@@ -69,7 +69,7 @@ hand-rolled `//go:wasmimport` lines. It runs only in the ut-cloud channel host
 
 `gofmt -l .` (no output), `go vet ./...`, `GOOS=wasip1 GOARCH=wasm go vet ./...`,
 `scripts/build.sh`, `go test ./...`, `scripts/validate.sh`, `scripts/package.sh`,
-`shellcheck scripts/*.sh`, `scripts/check-version-bump.test.sh`. Feature branch;
+`shellcheck scripts/*.sh`, `scripts/check-workflows.sh`, `scripts/check-version-bump.test.sh`. Feature branch;
 review record in `docs/code-reviews/<date>-<topic>.md`; then merge.
 
 ## Releases
