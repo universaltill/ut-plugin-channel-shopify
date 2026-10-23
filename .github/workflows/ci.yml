@@ -1,0 +1,69 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: go vet (host, with the FakeHost tests)
+        run: go vet ./...
+      - name: go vet (wasip1, the shipped module)
+        # Cross-compiled to match scripts/build.sh's GOOS/GOARCH: the SDK's
+        # real host imports only exist under wasip1. The *_test.go files are
+        # !wasip1 (they run on the SDK's FakeHost), so the host vet above
+        # covers them.
+        run: GOOS=wasip1 GOARCH=wasm go vet ./...
+      - name: gofmt check
+        run: |
+          fmt_out=$(gofmt -l .)
+          if [ -n "$fmt_out" ]; then
+            echo "gofmt found unformatted files:" >&2
+            echo "$fmt_out" >&2
+            exit 1
+          fi
+      - name: Lint (golangci-lint: import guard, errcheck, staticcheck, unused)
+        # .golangci.yml is the import guard that keeps net/http, os, time ...
+        # out of the shipped module. Same action and pin as universal-till's
+        # ci.yml (v9 needs golangci-lint v2.x, matching the config's schema).
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+      - name: Build WASI module
+        # Before the tests: the conformance package audits the built module's
+        # imports (CI is set, so a missing module fails instead of skipping).
+        run: scripts/build.sh
+      - name: Test (native, on plugin.FakeHost) and the conformance suite
+        run: go test ./...
+      - name: Validate manifest
+        run: scripts/validate.sh
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+      - name: Package (dry run)
+        run: scripts/package.sh
+
+  version-bump:
+    # PR-only: this compares the PR's base/head, which the push trigger
+    # above doesn't carry a meaningful pair for.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Need history back to the PR base, not just a shallow tip.
+          fetch-depth: 0
+      - name: Version-bump guard self-tests
+        if: always()
+        run: scripts/check-version-bump.test.sh
+      - name: Require a manifest.json version bump on shipped-file changes (ut-docs#1940)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: scripts/check-version-bump.sh

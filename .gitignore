@@ -1,0 +1,5 @@
+/bin/
+/dist/
+
+# agent review worktrees (transient)
+/.claude/worktrees/

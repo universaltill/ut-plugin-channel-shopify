@@ -1,0 +1,194 @@
+# ut-plugin-channel-shopify
+
+The **Shopify sales channel** for Universal Till (`com.universaltill.channel-shopify`).
+It connects a Shopify store to Universal Till: it imports the store's products
+and variants, sends price changes and stock to the store, brings its orders in
+and reports shipments with tracking back to Shopify. Nothing in the store is
+ever deleted.
+
+It is a signed **WASM plugin of type `channel`** that runs only in the ut-cloud
+channel host, never on a till (ADR-0169, contract
+`ut-docs/reference/contracts/sales-channel-v1.md`, card ut-docs#4773). It is the
+second adapter after the demo channel (`ut-plugin-channel-demo`) and uses the
+same layout, the same SDK (`github.com/universaltill/universal-till/sdk/plugin/channel`)
+and the same conformance approach.
+
+**Status: MVP, built and tested against a fake Shopify only.** Nothing here has
+run against a real Shopify store yet; that needs the Partner account, the
+development store and the app credentials the owner has to create (card
+#4773, "OWNER ACTION"). Everything in this repository is invented data.
+
+## What it does
+
+| Ask | Behaviour |
+|---|---|
+| `channel.connect.test.ask` | Reads the shop name, granted access scopes, locations and counts of products and orders. Writes nothing. |
+| `channel.oauth.callback.ask` | Parses the install parameters the host already verified; checks the shop domain; returns account and scopes. The host does the code exchange and the HMAC check; the plugin never sees a token or a secret. |
+| `channel.webhook.ask` | Parses a webhook the host already verified: topic, shop domain and webhook id from the headers, the order's global id from an order webhook. GDPR topics: the body is not read. No tenant context. |
+| `channel.import.ask` | Pages through products with variants (Admin GraphQL, cursor paging), then through every location's inventory levels. Submits `listing` and `stock_observed` records. Resumable through cursors; records are deterministic (`external_version` is Shopify's `updatedAt`) so a second import is byte-identical and the host reports zero changes. |
+| `channel.fetch.ask` / `channel.tick` | Re-fetch named orders / sweep orders updated since the `orders.since` cursor and submit contract `order` records with **no customer name, address, email or phone**. |
+| `channel.contact.ask` | Fetches an order's contact details live for display; never stored, submitted or logged. |
+| `channel.outbox.ask` | `stock.set` (absolute, compare-and-set on `expect`, inactive levels activated, a stale `expect` reports the shop's value and pulls recent orders), `fulfilment.create` (shipped with carrier and tracking), `listing.upsert` (variant prices only). Anything else is dead-lettered with `unsupported_op` and a logged `outbox.unsupported_op`: a delete, a cancel, a refund, and `listing.unpublish` (a product draft is an item push, and `items` is `pull`: card ut-docs#4774 adds it with the right declaration). Nothing is ever deleted. |
+
+The plugin has **no account name, no credential and no network of its own**.
+Its only network path is `channel_http` to one URL,
+`https://{account}/admin/api/2026-10/graphql.json`; the host fills in the
+connection's verified account and adds the access token.
+
+## Design decisions
+
+- **GraphQL variables only.** Every query text is a compile-time constant; ids,
+  cursors, prices and filter strings travel in `variables`. Ids are validated by
+  resource type (`gid://shopify/Order/<digits>`) before they are used.
+- **Paged import, not Shopify bulk operations.** ADR-0169 section 10 asks for
+  bulk operations on a large import. The plugin does not use them because a bulk
+  operation's result is a JSONL file on Shopify's storage host, which the
+  contract's egress rule (`https` to the account host only) forbids the plugin
+  to fetch. This differs from the accepted ADR on purpose; an ADR-0169
+  amendment (bulk result fetched by the host, or paging accepted as the MVP
+  path) is a **follow-up card**, and the ADR is not edited here. Page sizes keep
+  the requested query cost under Shopify's 1,000 point limit; every call passes
+  a cost hint for the host's pacing.
+- **Money** is integer minor units by string arithmetic (no float), per currency
+  exponent. A price with more decimals than the currency has is refused, not
+  rounded. A price pushed in another currency than the shop's is refused.
+- **Orders**: `qty` is the quantity as ordered; a unit removed by an order edit or
+  refunded shows only in `refunded_quantity` (and `restocked_quantity` when it
+  went back to stock). `total_minor` is Shopify's `totalPriceSet`, and the
+  adapter recomputes the contract's formula for every order (lines, all
+  shipping lines, `tax_added_minor`): an order whose numbers it does not
+  explain (a duty, a tip, an edit that changed the original total, a rounding
+  gap) is refused with the logged `order.refused.total_mismatch` (counts only),
+  never submitted for the cloud to reject silently. A line's discount is the
+  sum of its `discountAllocations`, so an order-level discount code (allocated
+  across lines) is inside `discount_line_minor` and `order_discount_minor` is 0.
+  Shipping is the sum of all shipping lines (differing tax rates:
+  `order.refused.mixed_shipping_tax`; more than 10: `too_many_shipping_lines`).
+  On a tax-excluded shop `tax_added_minor` is the order's own `totalTaxSet`,
+  not the sum of per-line taxes. A line list longer than 60 lines is refused
+  (`too_many_lines`), never truncated. Text is cut on a rune boundary: a line
+  title is at most 250 bytes of valid UTF-8 (the cloud refuses over 256 bytes
+  after decoding), invalid bytes are dropped. An edit-removed unit of an unpaid
+  order is `refunded_quantity` but never `restocked_quantity` (no refund line
+  says it went back; the stock observation of the next import or tick corrects
+  the count).
+  A unit is counted once in `refunded_quantity` (the larger of the refund lines
+  and the edit-removed units, never the sum). The query reads at most 5 refunds
+  and 20 refund lines each; it asks for one more, and an order that overflows is
+  refused with the logged reason `too_many_refunds`, never under-counted. A
+  payment state that is not paid (`PARTIALLY_PAID`) is `pending`; `EXPIRED` is
+  `voided`.
+- **Capabilities** are declared honestly: `items: pull`, `variants: both`
+  (price pushed to an existing variant), `stock: both`, `orders: pull`,
+  `fulfilment: push`. The adapter cannot create or edit an item (ut-docs#4774),
+  so it does not declare `items` push; the cloud would otherwise queue
+  `listing.upsert` for every new item and dead-letter it. For the same reason
+  it does not act on `listing.unpublish` (an undeclared capability is never
+  called); ut-docs#4774 adds it together with `items: both`.
+- **Per-ask budgets** (`src/app/budget.go`). The host gives every ask but import
+  a 30 second deadline (import 5 minutes) and kills a run at it, and Shopify
+  restores 50 points a second into a 1,000 point bucket while the host paces by
+  `cost_hint`. So time is bounded by requested cost, and every stop is between
+  units of work: the outbox drain stops starting operations after 40 requests,
+  150 host calls (logs and cursor writes included) or 600 points; the order
+  pull that follows a stale `stock.set` (once per ask) adds at most 2 pages of
+  2 orders, and no ask requests more than about 1,800 points (about 12 seconds
+  of refill). A started operation is always acknowledged; one not started stays
+  pending. An ack failure ends the drain (a repeat would perform the same op
+  again). A tick reads at most 2 pages of 2 orders per ask and resumes from
+  `orders.after`: a large backlog takes several ticks, and a page that would
+  not fit the cost cap is read again next ask, never skipped. A fetch that
+  cannot read all its orders inside the budget submits what it read and leaves
+  the rest to the next tick sweep (`fetch.deferred_to_tick`). Import stops near
+  9,000 points per ask and resumes from its cursor.
+- **Locations**: an import reads the first 20; a shop with more logs
+  `import.locations_truncated`.
+- **Fulfilment** reads the order's fulfilment orders first and fulfils the open
+  ones with the tracking details. An order Shopify already shows as fulfilled
+  (by us earlier, or by the shop in its own admin) is success. The customer is
+  not notified by this call (a setting is future work).
+- **Out of scope here** (ut-docs#4774): collections and categories, compare-at
+  price, images, customers, refunds, cancels, product creation, `productSet`.
+
+## Verify first on the dev store
+
+These Shopify names and behaviours were written from the Admin API 2026-10
+reference as remembered and have only run against `internal/fakeshop`. The
+names are defined once, in `src/app/queries.go` (a correction is one line),
+and a test keeps them there. First run on the development store, in this order:
+
+| Name / assumption | Where | What failing looks like |
+|---|---|---|
+| `changeFromQuantity` (or `compareQuantity`) in `inventorySetQuantities`, and `ignoreCompareQuantity` | `fCompareField`, `fCompareOff` | `userErrors` / a GraphQL schema error on every `stock.set` with `expect`: ops dead-letter as `rejected_by_channel`. Or no stale detection: a stale write goes through. |
+| `@idempotent(key:)` on `inventorySetQuantities` | `dIdempotent` | A GraphQL error "directive not defined" on every `stock.set`. The `Idempotency-Key` header is **not** a Shopify feature: it only tells the host the POST may be re-sent. |
+| `discountAllocations { allocatedAmountSet }` on a line is the COMPLETE list of discounts (the line's own and its share of an order-level code) | `fLineAllocations` | `order.refused.total_mismatch` or `bad_line` for an order with a discount code. Check one order with a line discount and one with a code. |
+| `totalTaxSet` is the order's tax and, with prices excluding tax, `totalPriceSet` = lines after discount + shipping + `totalTaxSet` | `fOrderTax`, `mapOrder` | `order.refused.total_mismatch` on every tax-excluded order (a cent off from rounding, or duties/tips in the total). |
+| `shippingLines(first:)` `discountedPriceSet` (ex tax) lists every shipping line | `fShippingLines` | `order.refused.total_mismatch` on an order with two shipping lines; `mixed_shipping_tax` when their rates differ. |
+| Duties and tips are not in `totalPriceSet`, or the formula refuses them | `mapOrder` | `order.refused.total_mismatch` for an order with a tip or duties; decide with the cloud whether the contract needs a field for them. |
+| `totalPriceSet` is the ORIGINAL total (before edits), matching `quantity` as ordered; an edit that adds or removes units does not change it | `mapOrder` | `order.refused.total_mismatch` on an edited order (then the contract formula needs `currentTotalPriceSet` with current quantities, a design change). |
+| `currentQuantity` = quantity minus every unit an edit removed AND every refunded unit | `mapOrder` (`max(refunded, removed)`) | `refunded_quantity` too low (an edit-removal plus a separate refund) or too high. |
+| An edit-removed unit of an UNPAID order has no refund line, and Shopify restocks it (or not) by its own rule | `mapOrder` | `restocked_quantity` stays 0 for it by design. Failing looks like Universal Till stock staying below Shopify's by the removed units after the next import/tick (no stock observation corrects it): then the mapping needs the edit's restock choice. |
+| `customer { id }` and `shippingAddress { countryCodeV2 }` need protected customer data access | `orderFields` | Orders arrive with no `customer`, or the whole order query fails with ACCESS_DENIED. |
+| `read_all_orders` is not in the scope list | `manifest.json` | Orders older than 60 days are invisible: an import of history stays empty. |
+| `refunds(first: 6)` / `refundLineItems(first: 21)`, `locations(first: 21)` cost and shape | `queries.go` | Throttling, or `order.refused.too_many_refunds` for ordinary orders. |
+| The requested costs (`Cost:` per query) | `queries.go` | Shopify's `extensions.cost.requestedQueryCost` is above the hand count: raise the hint. |
+
+## Layout
+
+```
+manifest.json            channel block, hosts ["cloud"], permissions ["net:{account}"]
+locales/                 en-US.json (the plugin shows a shop owner no text of its own)
+src/                     main.go (channel.Run) and app/ (the asks)
+internal/fakeshop/       the invented Shopify (GraphQL subset, webhooks, throttling, hostile modes)
+conformance/             the suite (Run) and the host emulator it runs an adapter on
+scripts/                 build, validate, package, publish, approve
+.golangci.yml            import guard: the shipped module may not reach for net/http, os, time ...
+```
+
+## Develop
+
+```
+go vet ./... && GOOS=wasip1 GOARCH=wasm go vet ./...
+scripts/build.sh                 # bin/plugin.wasm
+go test ./...                    # unit tests on the SDK's FakeHost + the conformance suite
+scripts/validate.sh && scripts/package.sh
+```
+
+Tests run natively against `internal/fakeshop` behind the conformance emulator
+(egress rules, credential injection and redaction, 429 and GraphQL `THROTTLED`
+retry, per-call caps). The emulator is **not** the cloud sandbox; the sandbox's
+own limits are pinned by ut-cloud `internal/channelhost`.
+
+## The conformance suite
+
+`conformance.Run(t, conformance.Target{...})` runs the checks of contract
+section 6 against this adapter and its own fake server. This repository copied
+the suite from `ut-plugin-channel-demo` and extended it for a GraphQL channel
+(a read is a POST, so a write is told by the operation; GraphQL deletes by
+mutation; cost hints; ids never reach a request body). Implemented: 1 (connect
+test reads and writes nothing), 2 (adapter side: a second import submits only
+what the first did, byte for byte), 7 (no outbox operation deletes) and 9 (a
+hostile shop cannot make the adapter leave `{account}`, leak the credential or
+overrun the caps). Checks 3, 4, 5, 6 and 8 are `t.Skip` TODOs naming the card
+they wait for (#4762, #4767, #4771); their adapter side is pinned in
+`src/app/*_test.go`. `conformance/selftest_test.go` runs the checks against
+deliberately broken adapters.
+
+## Release
+
+A release is the tag `v<manifest version>`, cut on merge to `main`. The workflow
+packages `dist/<id>_<version>_universal.tar.gz`, uploads it to the marketplace
+(`scripts/publish.sh`, placeholder `MARKETPLACE_BASE_URL=https://cloud.universaltill.com`)
+and, on the dev marketplace, approves it (`scripts/approve.sh`), which is where
+the marketplace **signs** it. Any change to what ships must bump
+`manifest.json`'s `version` (`scripts/check-version-bump.sh`).
+
+## Security
+
+No secret, client id or real shop data lives in this repo (ADR-0169 section 5).
+The app's client id and secret are entered by the operator in my. and sealed per
+tenant in the cloud; the test store's credentials live in Key Vault and private
+CI only. Every token and secret in the tests is an invented constant. Never
+point a test at a real shop.
+
+MIT licensed, see `LICENSE`.

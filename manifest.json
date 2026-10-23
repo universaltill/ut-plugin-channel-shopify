@@ -1,0 +1,42 @@
+{
+  "id": "com.universaltill.channel-shopify",
+  "name": "Shopify",
+  "version": "0.1.0",
+  "description": "Connects a Shopify store to Universal Till: imports its products and variants, sends price and stock changes to the store, brings its orders into Universal Till and reports shipments with tracking back to Shopify. Nothing in the store is ever deleted. It runs only in the Universal Till cloud.",
+  "author": "Universal Till",
+  "website": "https://universaltill.com",
+  "canonical_type": "channel",
+  "runtime": "wasm",
+  "entrypoint": "./bin/plugin.wasm",
+  "device_arch": "any",
+  "hosts": ["cloud"],
+  "channel_contract": 1,
+  "permissions": ["net:{account}"],
+  "locales": ["en-US"],
+  "channel": {
+    "kind": "webshop",
+    "account": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.myshopify\\.com$",
+    "account_suffix": ".myshopify.com",
+    "auth": {
+      "grants": ["code"],
+      "authorize_url": "https://{account}/admin/oauth/authorize",
+      "token_url": "https://{account}/admin/oauth/access_token",
+      "scopes": [
+        "read_products", "write_products", "read_inventory", "write_inventory", "read_locations",
+        "read_orders", "write_orders",
+        "read_merchant_managed_fulfillment_orders", "write_merchant_managed_fulfillment_orders"
+      ],
+      "callback_verify": {"param": "hmac", "alg": "hmac-sha256", "encoding": "hex", "canonical": "sorted-query-without-param", "timestamp_param": "timestamp"},
+      "inject": {"header": "X-Shopify-Access-Token"}
+    },
+    "capabilities": {
+      "items": "pull", "variants": "both", "stock": "both", "orders": "pull", "fulfilment": "push"
+    },
+    "limits": {"max_options": 3, "max_variants": 100},
+    "webhooks": {
+      "topics": ["orders/create", "orders/updated", "app/uninstalled", "customers/redact", "shop/redact", "customers/data_request"],
+      "verify": {"header": "X-Shopify-Hmac-Sha256", "alg": "hmac-sha256", "encoding": "base64"}
+    },
+    "schedules": [{"event": "reconcile", "every_s": 900, "jitter_s": 60}]
+  }
+}

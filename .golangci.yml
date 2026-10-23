@@ -1,0 +1,48 @@
+# The plugin runs in the cloud channel host (ADR-0169). Its only network path
+# is channel.HTTP and it holds no secret, so the import list is the guard:
+# nothing in the shipped module (src/**) may reach for the network, the
+# process, the filesystem or raw wasm imports itself.
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - depguard
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+  settings:
+    depguard:
+      rules:
+        shipped-module:
+          list-mode: lax
+          files:
+            - "**/src/**"
+            - "!**/*_test.go"
+          deny:
+            - pkg: net/http
+              desc: "the only network path is channel.HTTP (contract section 3)"
+            - pkg: net/rpc
+              desc: "the only network path is channel.HTTP"
+            - pkg: os/exec
+              desc: "a channel plugin starts no process"
+            - pkg: os
+              desc: "a channel plugin has no files and no environment"
+            - pkg: syscall
+              desc: "use the SDK, never hand-rolled host calls"
+            - pkg: unsafe
+              desc: "use the SDK's buffer ABI"
+            - pkg: math/rand
+              desc: "records are deterministic"
+            - pkg: time
+              desc: "records are deterministic: versions come from the channel, never from a clock"
+  exclusions:
+    paths:
+      - internal/fakeshop
+      - conformance
+
+formatters:
+  enable:
+    - gofmt
