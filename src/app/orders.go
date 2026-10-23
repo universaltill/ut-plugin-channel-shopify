@@ -354,7 +354,7 @@ func fetch(ev channel.Event) (any, error) {
 	if err := ev.Decode(&in); err != nil {
 		return nil, errors.New("fetch input is not valid JSON")
 	}
-	if len(in.ResourceIDs) > 100 {
+	if len(in.ResourceIDs) > maxFetchIDs {
 		return nil, errors.New("too many resources")
 	}
 	var recs []orderRecord

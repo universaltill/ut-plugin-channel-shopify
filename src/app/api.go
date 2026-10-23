@@ -90,8 +90,6 @@ const (
 	maxProductPages = 40  // per import ask; the rest resumes from the cursor
 	stockPage       = 50
 	maxStockPages   = 40
-	orderPage       = 2
-	maxOrderPages   = 2 // per tick; the rest resumes from the cursor (budget.go)
 	linePage        = 20
 	maxExtraLinePgs = 2 // an order over 60 lines is refused, logged, never truncated
 )

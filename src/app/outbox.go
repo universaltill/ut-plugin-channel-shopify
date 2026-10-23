@@ -98,6 +98,9 @@ func failFor(err error) channel.Ack {
 		}
 		return fail("rejected_by_channel", false)
 	case errors.As(err, &ge):
+		// A schema or validation error (a wrong field name) fails every op of
+		// that kind: leave one stable code for the operator.
+		hostLog(channel.LevelWarn, "outbox.graphql_error", map[string]any{"code": ge.Code})
 		if ge.Code == "ACCESS_DENIED" {
 			return fail("access_denied", false)
 		}
@@ -295,6 +298,11 @@ type fulfilmentState struct {
 			Nodes []struct {
 				ID     string `json:"id"`
 				Status string `json:"status"`
+				Loc    *struct {
+					Location *struct {
+						ID string `json:"id"`
+					} `json:"location"`
+				} `json:"assignedLocation"`
 			} `json:"nodes"`
 		} `json:"fulfillmentOrders"`
 	} `json:"order"`
@@ -324,19 +332,33 @@ func fulfil(op channel.OutboxOp) channel.Ack {
 	if st.Order.CancelledAt != "" {
 		return fail("order_cancelled", false)
 	}
-	var open []map[string]any
+	// One group per location, in the order Shopify lists them: a fulfillment
+	// may only hold fulfilment orders of one location.
+	var groups [][]map[string]any
+	byLoc := map[string]int{}
 	onHold := false
 	for _, f := range st.Order.FOs.Nodes {
 		switch f.Status {
 		case "OPEN", "IN_PROGRESS":
-			if okGID(tFulfOrder, f.ID) {
-				open = append(open, map[string]any{"fulfillmentOrderId": f.ID})
+			if !okGID(tFulfOrder, f.ID) {
+				continue
 			}
+			loc := ""
+			if f.Loc != nil && f.Loc.Location != nil && okGID(tLocation, f.Loc.Location.ID) {
+				loc = f.Loc.Location.ID
+			}
+			i, seen := byLoc[loc]
+			if !seen {
+				i = len(groups)
+				byLoc[loc] = i
+				groups = append(groups, nil)
+			}
+			groups[i] = append(groups[i], map[string]any{"fulfillmentOrderId": f.ID})
 		case "ON_HOLD":
 			onHold = true
 		}
 	}
-	if len(open) == 0 {
+	if len(groups) == 0 {
 		switch {
 		case st.Order.Fulfilment == "FULFILLED":
 			return channel.Ack{ExternalID: id}
@@ -345,7 +367,6 @@ func fulfil(op channel.OutboxOp) channel.Ack {
 		}
 		return fail("nothing_to_fulfil", false)
 	}
-	input := map[string]any{"notifyCustomer": false, "lineItemsByFulfillmentOrder": open}
 	tracking := map[string]any{}
 	if c := clip(p.Carrier, 100); c != "" {
 		tracking["company"] = c
@@ -356,30 +377,64 @@ func fulfil(op channel.OutboxOp) channel.Ack {
 	if u := trackingURL(p.TrackingURL); u != "" {
 		tracking["url"] = u
 	}
-	if len(tracking) > 0 {
-		input["trackingInfo"] = tracking
-	}
-	var r struct {
-		Create struct {
-			Errors []json.RawMessage `json:"userErrors"`
-		} `json:"fulfillmentCreate"`
-	}
-	// No Idempotency-Key here: the host would re-send a POST that may have
-	// acted. A lost answer comes back as a retryable error and the next
-	// attempt's read above sees the order fulfilled.
-	if err := run(qFulfillmentCreate, map[string]any{"fulfillment": input}, "", &r); err != nil {
-		return failFor(err)
-	}
-	if len(r.Create.Errors) > 0 {
-		// Probably someone fulfilled it between the read and the write:
-		// look again before calling it a failure.
-		var again fulfilmentState
-		if err := run(qFulfilmentOrders, map[string]any{"id": id}, "", &again); err == nil && again.Order != nil && again.Order.Fulfilment == "FULFILLED" {
-			return channel.Ack{ExternalID: id}
+	// A group that comes back with user errors does not stop the others: the
+	// op fails at the end, and a retry re-reads, so a location already
+	// fulfilled is never sent again.
+	var failed *channel.Ack
+	for _, group := range groups {
+		input := map[string]any{"notifyCustomer": false, "lineItemsByFulfillmentOrder": group}
+		if len(tracking) > 0 {
+			input["trackingInfo"] = tracking
 		}
-		return fail("rejected_by_channel", false)
+		var r struct {
+			Create struct {
+				Errors []json.RawMessage `json:"userErrors"`
+			} `json:"fulfillmentCreate"`
+		}
+		// No Idempotency-Key here: the host would re-send a POST that may have
+		// acted. A lost answer comes back as a retryable error and the next
+		// attempt's read above sees what is already fulfilled.
+		if err := run(qFulfillmentCreate, map[string]any{"fulfillment": input}, "", &r); err != nil {
+			return failFor(err) // transport trouble: stop, the retry re-reads
+		}
+		if len(r.Create.Errors) > 0 && failed == nil {
+			// Probably someone fulfilled it between the read and the write:
+			// look again before calling it a failure.
+			var again fulfilmentState
+			if err := run(qFulfilmentOrders, map[string]any{"id": id}, "", &again); err == nil && again.Order != nil && groupDone(again, group) {
+				continue
+			}
+			a := fail("rejected_by_channel", false)
+			failed = &a
+		} else if len(r.Create.Errors) > 0 {
+			hostLog(channel.LevelWarn, "fulfil.group_rejected", map[string]any{"groups": len(groups)})
+		}
+	}
+	if failed != nil {
+		return *failed
 	}
 	return channel.Ack{ExternalID: id}
+}
+
+// groupDone is true when the whole order shows fulfilled or every fulfilment
+// order of the group is closed (someone else fulfilled them). A cancelled or
+// held one is not "done".
+func groupDone(s fulfilmentState, group []map[string]any) bool {
+	if s.Order.Fulfilment == "FULFILLED" {
+		return true
+	}
+	for _, g := range group {
+		closed := false
+		for _, f := range s.Order.FOs.Nodes {
+			if f.ID == g["fulfillmentOrderId"] && f.Status == "CLOSED" {
+				closed = true
+			}
+		}
+		if !closed {
+			return false
+		}
+	}
+	return true
 }
 
 // trackingURL keeps a tracking link only when it is an https URL.

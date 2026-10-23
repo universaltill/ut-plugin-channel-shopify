@@ -312,8 +312,32 @@ func TestFetchReadsTheNamedOrdersAndIgnoresBadOnes(t *testing.T) {
 			t.Errorf("a bad id reached a request: %v", r.Variables)
 		}
 	}
-	if r := e.em.Ask(channel.AskFetch, channel.FetchInput{ResourceIDs: make([]string, 101)}); r.Err == nil {
-		t.Error("101 resources accepted")
+	if r := e.em.Ask(channel.AskFetch, channel.FetchInput{ResourceIDs: make([]string, app.MaxFetchIDs+1)}); r.Err == nil {
+		t.Errorf("%d resources accepted", app.MaxFetchIDs+1)
+	}
+}
+
+// The host hands a fetch up to 250 resource ids. The adapter takes them all,
+// reads what its budget allows and leaves the rest to the tick sweep, rather
+// than failing the ask (which the host would retry with the same 250).
+func TestFetchAccepts250IdsReadsWithinBudgetAndDefersTheRest(t *testing.T) {
+	if app.MaxFetchIDs != 250 {
+		t.Fatalf("MaxFetchIDs %d, the host's cap is 250", app.MaxFetchIDs)
+	}
+	e := newEnv(t, fakeshop.Options{})
+	ids := make([]string, 250)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("gid://shopify/Order/%d", 5001+i%3)
+	}
+	r := e.em.Ask(channel.AskFetch, channel.FetchInput{Event: channel.EventOrderChanged, ResourceIDs: ids})
+	if r.Err != nil {
+		t.Fatalf("250 ids refused: %v", r.Err)
+	}
+	if c := askCost(e, 0); c > app.AskCostBudget+300 {
+		t.Fatalf("%d points requested for one fetch ask", c)
+	}
+	if _, ok := logged(e, "fetch.deferred_to_tick"); !ok {
+		t.Error("the ids past the budget were not deferred to the tick")
 	}
 }
 
@@ -420,5 +444,45 @@ func TestPaymentStatesThatAreNotPaidAreNotReportedAsPaid(t *testing.T) {
 				t.Errorf("%s: payment_state %q, want %q", fin, o.PaymentState, want)
 			}
 		}
+	}
+}
+
+// The host paces nothing by cost yet (ut-cloud channelhost egress retries a
+// throttled request six times, then dead-letters it). The ask that meets that
+// must end with an error, leave the sweep exactly where it was, and the next
+// ask must carry on without losing or repeating an order.
+func TestAThrottledTickEndsSafelyAndTheSweepResumes(t *testing.T) {
+	e := newEnv(t, fakeshop.Options{})
+	e.shop.AddOrders(10) // 13 orders
+	e.tick()
+	cur := map[string]string{}
+	for k, v := range e.em.Host.Cursors {
+		cur[k] = string(v)
+	}
+	submitted := len(e.submitted(channel.KindOrder))
+	e.shop.SetGraphQLThrottle(1)
+	if r := e.em.Ask(channel.AskTick, map[string]string{"event": "reconcile"}); r.Err == nil {
+		t.Fatal("a tick whose every request is throttled should end with an error, not claim success")
+	}
+	for k, v := range e.em.Host.Cursors {
+		if cur[k] != string(v) {
+			t.Errorf("cursor %s moved from %q to %q on a throttled ask", k, cur[k], v)
+		}
+	}
+	if n := len(e.submitted(channel.KindOrder)); n != submitted {
+		t.Errorf("a throttled ask submitted %d orders", n-submitted)
+	}
+	e.shop.SetGraphQLThrottle(0)
+	e.tickAll()
+	seen := map[string]int{}
+	for _, raw := range e.submitted(channel.KindOrder) {
+		var r struct {
+			ExternalID string `json:"external_id"`
+		}
+		_ = json.Unmarshal(raw, &r)
+		seen[r.ExternalID]++
+	}
+	if len(seen) != 13 {
+		t.Errorf("%d distinct orders after resuming, want 13", len(seen))
 	}
 }

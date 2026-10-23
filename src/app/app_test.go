@@ -444,7 +444,7 @@ func TestTheQueriesAskForOneMoreThanTheCapsTheyEnforce(t *testing.T) {
 // used from there: a correction after the dev-store run is one line.
 func TestFromMemoryShopifyNamesLiveInOnePlace(t *testing.T) {
 	all := strings.Join(app.AllQueries(), "\n")
-	for _, n := range []string{app.FLineAllocations, app.FOrderTax, app.FShippingLines, app.DIdempotent} {
+	for _, n := range []string{app.FLineAllocations, app.FOrderTax, app.FShippingLines, app.DIdempotent, app.FFOLocation} {
 		if !strings.Contains(all, n) {
 			t.Errorf("%q is not in the query texts", n)
 		}
@@ -454,7 +454,7 @@ func TestFromMemoryShopifyNamesLiveInOnePlace(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, lit := range []string{`"changeFromQuantity"`, `"ignoreCompareQuantity"`, "@idempotent", "totalDiscountSet", "discountedTotalSet"} {
+		for _, lit := range []string{`"changeFromQuantity"`, `"ignoreCompareQuantity"`, "@idempotent", "assignedLocation {", "totalDiscountSet", "discountedTotalSet"} {
 			if strings.Contains(string(b), lit) {
 				t.Errorf("%s spells the from-memory name %s itself: use the constant in queries.go", f, lit)
 			}

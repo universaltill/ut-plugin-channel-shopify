@@ -479,3 +479,82 @@ func TestTheDrainAlsoStopsOnTheRequestBudgetWhenRequestsAreCheap(t *testing.T) {
 		t.Fatalf("acked %d of 100 with %d requests: the request budget (%d) should stop the drain", n, e.em.HTTPCalls(), app.DrainHTTPBudget)
 	}
 }
+
+// Shopify refuses a fulfillment whose fulfilment orders sit at different
+// locations: a multi-location order needs one fulfillmentCreate per location.
+func TestFulfilmentOfAMultiLocationOrderIsOneCreatePerLocation(t *testing.T) {
+	e := newEnv(t, fakeshop.Options{})
+	id := "gid://shopify/Order/5001"
+	e.shop.AddFulfilmentOrder(id, 2)
+	e.shop.AddFulfilmentOrder(id, 3)
+	payload := fmt.Sprintf(`{"external_order_id": %q, "carrier": "Invented Post", "tracking_number": "IP1"}`, id)
+	a := e.outbox(fulfilOp("op-1", id, payload))["op-1"]
+	if a.Error != nil || a.ExternalID != id {
+		t.Fatalf("ack %+v", a)
+	}
+	creates := 0
+	for _, r := range e.shop.Requests() {
+		if r.Op == "FulfillmentCreate" {
+			creates++
+		}
+	}
+	if creates != 3 || e.shop.Performed("fulfil", id) != 3 {
+		t.Fatalf("creates %d performed %d, want one per location (3)", creates, e.shop.Performed("fulfil", id))
+	}
+	// Redelivery after success sends nothing more.
+	if a := e.outbox(fulfilOp("op-1", id, payload))["op-1"]; a.Error != nil || e.shop.Performed("fulfil", id) != 3 {
+		t.Fatalf("redelivery %+v performed %d", a, e.shop.Performed("fulfil", id))
+	}
+}
+
+func TestAFailedLocationGroupIsAckedAndNotResentWhenTheOpIsRetried(t *testing.T) {
+	e := newEnv(t, fakeshop.Options{})
+	id := "gid://shopify/Order/5001"
+	bad := e.shop.AddFulfilmentOrder(id, 2)
+	e.shop.RefuseFulfilmentOrder(bad)
+	payload := fmt.Sprintf(`{"external_order_id": %q, "carrier": "c"}`, id)
+	a := e.outbox(fulfilOp("op-1", id, payload))["op-1"]
+	if a.Error == nil || a.Error.Code != "rejected_by_channel" || a.Error.Retryable {
+		t.Fatalf("ack %+v", a)
+	}
+	if e.shop.Performed("fulfil", id) != 1 {
+		t.Fatalf("the good location should be fulfilled once, got %d", e.shop.Performed("fulfil", id))
+	}
+	// A retry (an operator re-queues it) re-reads: the fulfilled location is
+	// not sent again.
+	e.outbox(fulfilOp("op-2", id, payload))
+	if e.shop.Performed("fulfil", id) != 1 {
+		t.Fatalf("a fulfilled location was re-sent: %d", e.shop.Performed("fulfil", id))
+	}
+}
+
+// If the from-memory stock names are wrong, Shopify answers every stock.set
+// with a GraphQL schema error. That must dead-letter (not retry forever) and
+// leave a stable log code for the operator.
+func TestAGraphQLSchemaErrorOnStockSetDeadLettersWithAStableLogCode(t *testing.T) {
+	e := newEnv(t, fakeshop.Options{})
+	e.shop.SchemaError("InventorySet")
+	v := e.shop.VariantIDs(1)[0]
+	a := e.outbox(stockOp("op-1", v, i64(11), `{"available": 3}`))["op-1"]
+	if a.Error == nil || a.Error.Code != "rejected_by_channel" || a.Error.Retryable {
+		t.Fatalf("ack %+v", a)
+	}
+	n := 0
+	for _, r := range e.shop.Requests() {
+		if r.Op == "InventorySet" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("the schema error was sent %d times, want once (no retry loop)", n)
+	}
+	code := ""
+	for _, l := range e.em.Host.Logs {
+		if l.Code == "outbox.graphql_error" {
+			code = fmt.Sprint(l.Fields["code"])
+		}
+	}
+	if code != "undefinedField" {
+		t.Errorf("graphql error log code %q, want undefinedField", code)
+	}
+}
