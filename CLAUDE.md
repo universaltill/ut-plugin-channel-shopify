@@ -38,13 +38,18 @@ hand-rolled `//go:wasmimport` lines. It runs only in the ut-cloud channel host
   `Idempotency-Key` header (a signal to the HOST that a re-send is safe;
   Shopify ignores it) and (inventory) as the `@idempotent` variable; the
   fulfilment write carries no key and is made retry-safe by reading first.
-- **Per-ask budgets** (`src/app/budget.go`) keep an ask inside the host's 30 s
-  deadline (import 5 min) and caps (2,000 HTTP, 5,000 host calls, 20,000
-  records); every request carries a `cost_hint` under Shopify's 1,000 points.
-  Stops fall between units of work, a started op is always acked, an ack
-  failure ends the drain, a budget-limited ask resumes from its cursor. Count
-  every host call (`hostLog`, `cursorSet`), never call `channel.Log` or
-  `channel.CursorSet` directly.
+- **Per-ask budgets** (`src/app/budget.go`) are call-count and point accounting
+  inside the plugin that keep an ask small against the host's 30 s deadline
+  (import 5 min) and caps (2,000 HTTP, 5,000 host calls, 20,000 records). The
+  host does NOT pace by `cost_hint` yet (ut-cloud `egress.go` stores it; it only
+  retries a throttle with back-off, then dead-letters); wall time is requests x
+  latency. Stops fall between units of work, a started op is always acked, an
+  ack failure ends the drain, a budget-limited ask resumes from its cursor. The
+  order page constants are unmeasured (dev-store row in README). Count every host
+  call (`hostLog`, `cursorSet`), never call `channel.Log` or `channel.CursorSet`
+  directly.
+- **Fulfilment**: one `fulfillmentCreate` per location (fulfilment orders of
+  different locations cannot share one).
 - **Text in a record goes through `clip`** (rune boundary, invalid bytes
   dropped): the cloud refuses a line title over 256 bytes after JSON decoding.
 - **An order is refused, logged, if the contract's total formula does not

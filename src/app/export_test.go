@@ -18,6 +18,7 @@ func Clip(s string, n int) string { return clip(s, n) }
 const (
 	MaxTitleBytes    = maxTitleBytes
 	OrderPage        = orderPage
+	MaxFetchIDs      = maxFetchIDs
 	MaxOrderPages    = maxOrderPages
 	DrainHTTPBudget  = drainHTTPBudget
 	DrainHostBudget  = drainHostBudget
@@ -49,6 +50,7 @@ const (
 // Names written from memory, for the "verify first" test.
 const (
 	FLineAllocations = fLineAllocations
+	FFOLocation      = fFOLocation
 	FOrderTax        = fOrderTax
 	FShippingLines   = fShippingLines
 	FCompareField    = fCompareField

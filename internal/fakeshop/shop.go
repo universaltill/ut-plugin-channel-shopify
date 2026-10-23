@@ -119,7 +119,9 @@ type ShipLine struct {
 	Rate   float64
 }
 
-type fulfilmentOrder struct{ ID, Status string }
+// fulfilmentOrder is Shopify's FulfillmentOrder: assigned to one location, and
+// a fulfillment may only hold fulfilment orders of one location.
+type fulfilmentOrder struct{ ID, Status, Loc string }
 
 // Order is an order as the shop holds it (amounts in minor units).
 type Order struct {
@@ -167,6 +169,8 @@ type Shop struct {
 	calls     int
 	idem      map[string]string // idempotency key -> cached mutation answer
 	acts      map[string]int    // "<kind>:<id>" -> times performed
+	failFO    map[string]bool   // fulfilment orders whose fulfillment is refused
+	schemaErr map[string]bool   // operations answered with a schema error
 	codes     map[string]bool
 	tracking  map[string][3]string
 }
@@ -249,7 +253,7 @@ func seedOrders(ps []product, o Options) []Order {
 			ID: gid("Order", 5000+n), Name: fmt.Sprintf("#%d", 1000+n), CreatedAt: ts, UpdatedAt: ts,
 			TaxesIncluded: !o.TaxesExcluded, Fin: "PAID", Ful: "UNFULFILLED", Ship: 399, ShipRate: 0.2,
 			Lines: []orderLine{{ID: gid("LineItem", 6000+n), Name: ps[n-1].Title, SKU: v.SKU, VariantID: v.ID, Qty: int64(n), CurQty: int64(n), Unit: unit, Rate: 0.2}},
-			FOs:   []fulfilmentOrder{{ID: gid("FulfillmentOrder", 8000+n), Status: "OPEN"}},
+			FOs:   []fulfilmentOrder{{ID: gid("FulfillmentOrder", 8000+n), Status: "OPEN", Loc: gid("Location", 1)}},
 			Customer: Customer{ID: gid("Customer", 9000+n), Country: "GB", Name: "Invented Person", Email: "invented@example.invalid",
 				Phone: "+440000000000", Address: "1 Invented Street"},
 		}
@@ -519,7 +523,7 @@ func (s *Shop) AddOrders(n int) {
 		o := Order{ID: gid("Order", 5000+k), Name: fmt.Sprintf("#%d", 1000+k), CreatedAt: ts, UpdatedAt: ts, TaxesIncluded: !s.opt.TaxesExcluded,
 			Fin: "PAID", Ful: "UNFULFILLED", Ship: 100, ShipRate: 0.2,
 			Lines: []orderLine{{ID: gid("LineItem", 6000+k), Name: "Invented", SKU: v.SKU, VariantID: v.ID, Qty: 1, CurQty: 1, Unit: parseMinor(v.Price), Rate: 0.2}},
-			FOs:   []fulfilmentOrder{{ID: gid("FulfillmentOrder", 8000+k), Status: "OPEN"}}}
+			FOs:   []fulfilmentOrder{{ID: gid("FulfillmentOrder", 8000+k), Status: "OPEN", Loc: gid("Location", 1)}}}
 		o.Total = totalOf(o)
 		s.orders = append(s.orders, o)
 	}
@@ -788,4 +792,12 @@ func (s *Shop) graphql(w http.ResponseWriter, r *http.Request) {
 func costExt(requested, actual int) map[string]any {
 	return map[string]any{"cost": map[string]any{"requestedQueryCost": requested, "actualQueryCost": actual,
 		"throttleStatus": map[string]any{"maximumAvailable": 1000.0, "currentlyAvailable": 900.0, "restoreRate": 50.0}}}
+}
+
+// SetGraphQLThrottle changes Options.GraphQLThrottleEvery while the shop runs
+// (0 = never). Call it between asks, not during one.
+func (s *Shop) SetGraphQLThrottle(every int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.opt.GraphQLThrottleEvery = every
 }

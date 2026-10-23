@@ -9,8 +9,9 @@ package app
 // have only been exercised against internal/fakeshop; the owner's development
 // store run (ut-docs#4773 OWNER ACTION) is what proves them against Shopify.
 // Costs are hand-counted upper bounds of the REQUESTED cost, kept under
-// Shopify's 1,000-point single-query limit, and go to the host as the pacing
-// hint (channel_http cost_hint).
+// Shopify's 1,000-point single-query limit, and go to the host as the
+// channel_http cost_hint. The host stores the hint and does not pace by it yet
+// (budget.go).
 
 // VERIFY FIRST ON THE DEV STORE (README, "Verify first on the dev store"):
 // every Shopify name written from memory lives in this block, so a correction
@@ -35,6 +36,10 @@ const (
 	// Idempotency-Key HTTP header is NOT a Shopify feature: it is only a signal
 	// to the host that the POST is safe to re-send.
 	dIdempotent = `@idempotent(key: $key)`
+	// The location a fulfilment order is assigned to. Shopify refuses a
+	// fulfillment whose fulfilment orders sit at different locations, so the
+	// adapter sends one fulfillmentCreate per location.
+	fFOLocation = `assignedLocation { location { id } }`
 )
 
 // How many refunds and refund lines per refund the order query reads. The
@@ -122,7 +127,7 @@ var (
 		`productVariantsBulkUpdate(productId: $productId, variants: $variants) { userErrors { code } } }`}
 
 	qFulfilmentOrders = queryDef{Name: "FulfilmentOrders", Cost: 20, Text: `query FulfilmentOrders($id: ID!) { order(id: $id) { ` +
-		`cancelledAt displayFulfillmentStatus fulfillmentOrders(first: 10) { nodes { id status } } } }`}
+		`cancelledAt displayFulfillmentStatus fulfillmentOrders(first: 10) { nodes { id status ` + fFOLocation + ` } } } }`}
 
 	qFulfillmentCreate = queryDef{Name: "FulfillmentCreate", Cost: 10, Mutation: true, Text: `mutation FulfillmentCreate($fulfillment: FulfillmentInput!) { ` +
 		`fulfillmentCreate(fulfillment: $fulfillment) { userErrors { field } } }`}

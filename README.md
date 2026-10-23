@@ -86,25 +86,36 @@ connection's verified account and adds the access token.
   it does not act on `listing.unpublish` (an undeclared capability is never
   called); ut-docs#4774 adds it together with `items: both`.
 - **Per-ask budgets** (`src/app/budget.go`). The host gives every ask but import
-  a 30 second deadline (import 5 minutes) and kills a run at it, and Shopify
-  restores 50 points a second into a 1,000 point bucket while the host paces by
-  `cost_hint`. So time is bounded by requested cost, and every stop is between
-  units of work: the outbox drain stops starting operations after 40 requests,
-  150 host calls (logs and cursor writes included) or 600 points; the order
-  pull that follows a stale `stock.set` (once per ask) adds at most 2 pages of
-  2 orders, and no ask requests more than about 1,800 points (about 12 seconds
-  of refill). A started operation is always acknowledged; one not started stays
-  pending. An ack failure ends the drain (a repeat would perform the same op
-  again). A tick reads at most 2 pages of 2 orders per ask and resumes from
-  `orders.after`: a large backlog takes several ticks, and a page that would
-  not fit the cost cap is read again next ask, never skipped. A fetch that
-  cannot read all its orders inside the budget submits what it read and leaves
-  the rest to the next tick sweep (`fetch.deferred_to_tick`). Import stops near
-  9,000 points per ask and resumes from its cursor.
+  a 30 second deadline (import 5 minutes) and kills a run at it. The budgets are
+  call-count and Shopify-point accounting **inside the plugin**; the host does
+  **not** pace requests by `cost_hint` yet (ut-cloud `channelhost/egress.go`
+  stores the hint and never reads it; it only retries a throttled request with
+  back-off, 500 ms doubling, six attempts, 7.75 to 15.5 s, then dead-letters
+  it). So wall time is bounded by the request count times each request's
+  latency, and a throttle the back-off cannot clear ends the ask with an error
+  that leaves the cursor or the outbox untouched; the next ask resumes. A
+  ut-cloud card tracks host pacing by cost hint. Every stop is between units of
+  work: the outbox drain stops starting operations after 40 requests, 150 host
+  calls (logs and cursor writes included) or 600 points; the order pull that
+  follows a stale `stock.set` (once per ask) adds at most 2 pages of 2 orders,
+  and no ask requests more than about 1,800 points. A started operation is
+  always acknowledged; one not started stays pending. An ack failure ends the
+  drain (a repeat would perform the same op again). A tick reads at most 2
+  pages of 2 orders per ask and resumes from `orders.after`: a page that would
+  not fit the cost cap is read again next ask, never skipped. **Until the dev
+  store run raises those numbers (below), a big shop's first sweep is slow**:
+  4 orders per 15 minute tick, about 62 hours for 1,000 orders. Nothing is
+  lost, it only lags. A fetch takes up to 250 ids (the host's cap), reads what
+  its budget allows and leaves the rest to the next tick sweep
+  (`fetch.deferred_to_tick`). Import stops near 9,000 points per ask and
+  resumes from its cursor.
 - **Locations**: an import reads the first 20; a shop with more logs
   `import.locations_truncated`.
 - **Fulfilment** reads the order's fulfilment orders first and fulfils the open
-  ones with the tracking details. An order Shopify already shows as fulfilled
+  ones with the tracking details, one `fulfillmentCreate` per location (Shopify
+  refuses a fulfillment spanning locations). If one location is refused the
+  others are still fulfilled, the op is acked failed, and a retry re-reads and
+  sends only what is still open. An order Shopify already shows as fulfilled
   (by us earlier, or by the shop in its own admin) is success. The customer is
   not notified by this call (a setting is future work).
 - **Out of scope here** (ut-docs#4774): collections and categories, compare-at
@@ -116,6 +127,10 @@ These Shopify names and behaviours were written from the Admin API 2026-10
 reference as remembered and have only run against `internal/fakeshop`. The
 names are defined once, in `src/app/queries.go` (a correction is one line),
 and a test keeps them there. First run on the development store, in this order:
+
+> **Do not queue real stock ops on a shop until the first two rows pass:** a
+> schema error there dead-letters every `stock.set` non-retryably (log code
+> `outbox.graphql_error`).
 
 | Name / assumption | Where | What failing looks like |
 |---|---|---|
@@ -131,6 +146,8 @@ and a test keeps them there. First run on the development store, in this order:
 | `customer { id }` and `shippingAddress { countryCodeV2 }` need protected customer data access | `orderFields` | Orders arrive with no `customer`, or the whole order query fails with ACCESS_DENIED. |
 | `read_all_orders` is not in the scope list | `manifest.json` | Orders older than 60 days are invisible: an import of history stays empty. |
 | `refunds(first: 6)` / `refundLineItems(first: 21)`, `locations(first: 21)` cost and shape | `queries.go` | Throttling, or `order.refused.too_many_refunds` for ordinary orders. |
+| Order query cost and page size | `orderPage`, `maxOrderPages` (`budget.go`), `Cost:` in `queries.go` | Read `extensions.cost.actualQueryCost` of one `Orders` query, then raise `orderPage`/`maxOrderPages` and lower the cost hint. Until then a first sweep of a big shop is slow (4 orders per tick). |
+| `assignedLocation { location { id } }` on a fulfilment order | `fFOLocation` | A GraphQL error on every `fulfil` (non-retryable), or one fulfillment per order not per location (userErrors on multi-location orders). |
 | The requested costs (`Cost:` per query) | `queries.go` | Shopify's `extensions.cost.requestedQueryCost` is above the hand count: raise the hint. |
 
 ## Layout

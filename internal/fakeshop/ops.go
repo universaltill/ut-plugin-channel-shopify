@@ -61,6 +61,9 @@ func (s *Shop) num(req gqlRequest, name string, def int) int {
 
 // dispatch answers one operation. Called with s.mu held.
 func (s *Shop) dispatch(req gqlRequest) (any, string) {
+	if s.schemaErr[req.OperationName] {
+		return nil, "undefinedField"
+	}
 	switch req.OperationName {
 	case "ConnectTest":
 		var locs []obj
@@ -152,7 +155,7 @@ func (s *Shop) dispatch(req gqlRequest) (any, string) {
 			if o.ID == s.str(req, "id") {
 				var fos []obj
 				for _, f := range o.FOs {
-					fos = append(fos, obj{"id": f.ID, "status": f.Status})
+					fos = append(fos, obj{"id": f.ID, "status": f.Status, "assignedLocation": obj{"location": obj{"id": f.Loc}}})
 				}
 				var cancelled any
 				if o.CancelledAt != "" {
@@ -487,35 +490,82 @@ func (s *Shop) opFulfil(req gqlRequest) obj {
 	if len(in.Lines) == 0 {
 		return fail
 	}
-	for i := range s.orders {
-		o := &s.orders[i]
-		if o.CancelledAt != "" {
-			continue
-		}
-		for _, l := range in.Lines {
+	// Validate everything first: like Shopify, one bad entry refuses the
+	// whole fulfillment, and every entry must be at one location.
+	var order *Order
+	loc := ""
+	for _, l := range in.Lines {
+		found := false
+		for i := range s.orders {
+			o := &s.orders[i]
 			for j := range o.FOs {
-				if o.FOs[j].ID != l.FulfillmentOrderID {
+				f := o.FOs[j]
+				if f.ID != l.FulfillmentOrderID {
 					continue
 				}
-				if o.FOs[j].Status != "OPEN" && o.FOs[j].Status != "IN_PROGRESS" {
+				found = true
+				if (order != nil && order != o) || o.CancelledAt != "" || s.failFO[f.ID] ||
+					(f.Status != "OPEN" && f.Status != "IN_PROGRESS") || (loc != "" && loc != f.Loc) {
 					return fail
 				}
-				o.FOs[j].Status = "CLOSED"
-				s.acts["fulfil:"+o.ID]++
-				s.tracking[o.ID] = [3]string{in.TrackingInfo.Company, in.TrackingInfo.Number, in.TrackingInfo.URL}
+				order, loc = o, f.Loc
 			}
 		}
-		all := true
-		for _, f := range o.FOs {
-			all = all && f.Status == "CLOSED"
+		if !found {
+			return fail
 		}
-		if all {
-			o.Ful = "FULFILLED"
-		}
-		o.UpdatedAt = s.bump()
-		return obj{"fulfillmentCreate": obj{"userErrors": []obj{}}}
 	}
-	return fail
+	for _, l := range in.Lines {
+		for j := range order.FOs {
+			if order.FOs[j].ID == l.FulfillmentOrderID {
+				order.FOs[j].Status = "CLOSED"
+			}
+		}
+	}
+	s.acts["fulfil:"+order.ID]++
+	s.tracking[order.ID] = [3]string{in.TrackingInfo.Company, in.TrackingInfo.Number, in.TrackingInfo.URL}
+	all := true
+	for _, f := range order.FOs {
+		all = all && f.Status == "CLOSED"
+	}
+	if all {
+		order.Ful = "FULFILLED"
+	}
+	order.UpdatedAt = s.bump()
+	return obj{"fulfillmentCreate": obj{"userErrors": []obj{}}}
+}
+
+// AddFulfilmentOrder gives an order one more fulfilment order, assigned to
+// the location with that number; it returns the new id.
+func (s *Shop) AddFulfilmentOrder(orderID string, location int) string {
+	id := ""
+	s.MutateOrder(orderID, func(o *Order) {
+		id = gid("FulfillmentOrder", 8500+len(o.FOs)+location*10)
+		o.FOs = append(o.FOs, fulfilmentOrder{ID: id, Status: "OPEN", Loc: gid("Location", location)})
+	})
+	return id
+}
+
+// RefuseFulfilmentOrder makes every fulfillment that holds this fulfilment
+// order come back with a user error (the location cannot ship, say).
+func (s *Shop) RefuseFulfilmentOrder(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failFO == nil {
+		s.failFO = map[string]bool{}
+	}
+	s.failFO[id] = true
+}
+
+// SchemaError makes the named operation fail like a query Shopify's schema
+// does not know: a GraphQL error with an undefinedField code.
+func (s *Shop) SchemaError(operation string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.schemaErr == nil {
+		s.schemaErr = map[string]bool{}
+	}
+	s.schemaErr[operation] = true
 }
 
 // --- merchant-side edits for tests ---------------------------------------

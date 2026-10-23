@@ -87,8 +87,9 @@ fake. All live in `src/app/queries.go`; README has the same table.
 ## Changes after the second independent review (Builder, Sonnet 5.5)
 
 Fixes for the round-2 findings; the findings table below stays the human
-reviewer's. Every fix was written test first or mutation-checked afterwards
-(the mutation results are in the Builder's hand-off, not repeated here).
+reviewer's. Each fix has a test; mutation checks were reported in the Builder's
+hand-off, which is not part of this repository, so the tests are the evidence
+here.
 
 - **Line title over the cloud's 256-byte limit (HIGH).** `clip` cut at a byte,
   mid-character, and `json.Marshal` turned the stray byte into a 3-byte U+FFFD
@@ -129,13 +130,13 @@ reviewer's. Every fix was written test first or mutation-checked afterwards
 |---|---|---|---|
 | R1-B1 | Blocker (cloud) | The cloud's personal-key scan refused `lines[].name`, so every order would be rejected | Fixed in ut-cloud#601 (ut-docs#4890); `personal_keys_test.go` mirrors the host scan |
 | R1-H1/H2 | High | `changeFromQuantity` (vs `compareQuantity`) and `@idempotent(key:)` are from memory | Cannot be settled without a real shop; isolated in one block, listed under "Verify first on the dev store" |
-| R1-H3..H5 | High | Order-level discount codes, truncated refunds, double-counted edit removals | Fixed, mutation-checked |
+| R1-H3..H5 | High | Order-level discount codes, truncated refunds, double-counted edit removals | Fixed, with tests |
 | R1-M1..M4, L | Medium/Low | No outbox budget, over-declared capabilities, README vs ADR wording, location cap, cursor/regexp/status mapping | Fixed or documented |
 | R2-H1 | High | A long non-ASCII line title is cut mid-character and the cloud rejects the order | Fixed (rune-boundary `clip`, 250-byte cap, mirrored in the host-scan test) |
 | R2-M1 | Medium | Outbox/tick budgets larger than the 30 s deadline | Fixed (`budget.go`, a few tens of calls per ask) |
 | R2-M2 | Medium | `listing.unpublish` contradicts `items: pull` | Removed from the MVP; unknown op dead-letters (#4774 adds it) |
 | R2-M3/M4 | Medium | Edit-removed units on unpaid orders; total formula assumptions | Documented, pinned by tests, total mismatch refused and logged |
-| R3 | - | The third round of fixes (budget.go, total check, clip) was verified by the builder's mutation tests and the parent's re-run of every gate, NOT by a third independent review | Run a third independent review before this release is ever approved in the marketplace |
+| R3 | - | The third round of fixes (budget.go, total check, clip) was verified by the builder's tests and the parent's re-run of every gate, NOT by a third independent review | Run a third independent review before this release is ever approved in the marketplace |
 
 ## Verdict
 
