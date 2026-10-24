@@ -25,7 +25,13 @@ var mutationName = regexp.MustCompile(`^mutation (\w+)`)
 
 var allowedMutations = map[string]bool{
 	"InventorySet": true, "InventoryActivate": true, "VariantPrices": true, "FulfillmentCreate": true,
+	// ut-docs#4774: a cancel keeps the order and a refund adds a refund; neither deletes.
+	"OrderCancel": true, "RefundCreate": true,
 }
+
+// destructiveNames are the only mutations whose text may mention removing,
+// cancelling or refunding; every other mutation naming one is a finding.
+var destructiveNames = map[string]bool{"OrderCancel": true, "RefundCreate": true}
 
 // exercise drives every ask the adapter has, with good and hostile input.
 func exercise(e *env) {
@@ -42,7 +48,10 @@ func exercise(e *env) {
 		channel.OutboxOp{ID: "p1", Kind: channel.OpListingUpsert, ExternalID: e.shop.ProductIDs()[0], Payload: json.RawMessage(fmt.Sprintf(`{"variants":[{"external_id":%q,"price_minor":900,"currency":"GBP"}]}`, v))},
 		channel.OutboxOp{ID: "u1", Kind: channel.OpListingUnpublish, ExternalID: e.shop.ProductIDs()[1]},
 		channel.OutboxOp{ID: "d1", Kind: "listing.delete", ExternalID: e.shop.ProductIDs()[1]},
-		channel.OutboxOp{ID: "c1", Kind: channel.OpOrderCancel, ExternalID: "gid://shopify/Order/5001", Payload: json.RawMessage(`{"reason":"other"}`)},
+		channel.OutboxOp{ID: "c0", Kind: channel.OpOrderCancel, ExternalID: "gid://shopify/Order/5001", Payload: json.RawMessage(`{"reason":"other"}`)},
+		channel.OutboxOp{ID: "c1", Kind: channel.OpOrderCancel, ExternalID: "gid://shopify/Order/5003", Payload: json.RawMessage(`{"reason":"other","restock":true}`)},
+		channel.OutboxOp{ID: "r1", Kind: channel.OpRefundCreate, ExternalID: "gid://shopify/Order/5002",
+			Payload: json.RawMessage(`{"external_order_id":"gid://shopify/Order/5002","reason":"other","restock":true,"currency":"GBP","max_amount_minor":660,"lines":[{"line_external_id":"gid://shopify/LineItem/6002","quantity":1,"refunded_to":1,"restocked_to":1}]}`)},
 	)
 	e.ask(channel.AskOutbox, struct{}{})
 }
@@ -63,8 +72,13 @@ func TestNoOperationDeletesAnything(t *testing.T) {
 		if regexp.MustCompile(`(?i)delete|destroy`).MatchString(q) {
 			t.Errorf("an operation text mentions delete or destroy: %.80s", q)
 		}
-		if strings.HasPrefix(q, "mutation") && regexp.MustCompile(`(?i)remove|cancel|refund`).MatchString(q) {
-			t.Errorf("a mutation removes, cancels or refunds (out of scope for the MVP, ut-docs#4774): %.80s", q)
+		if m := mutationName.FindStringSubmatch(q); m != nil {
+			if !allowedMutations[m[1]] {
+				t.Errorf("mutation %s is not on the allow-list", m[1])
+			}
+			if regexp.MustCompile(`(?i)remove|cancel|refund`).MatchString(q) && !destructiveNames[m[1]] {
+				t.Errorf("mutation %s removes, cancels or refunds but is not one of the two allowed (OrderCancel, RefundCreate): %.80s", m[1], q)
+			}
 		}
 	}
 	for _, r := range e.shop.Requests() {
@@ -109,7 +123,8 @@ func TestQueriesAreConstantsAndValuesTravelAsVariables(t *testing.T) {
 		}
 		ops[r.Op] = true
 	}
-	for _, want := range []string{"ConnectTest", "Products", "Locations", "Levels", "Orders", "Order", "Contact", "StockTarget", "InventorySet", "VariantPrices", "FulfilmentOrders", "FulfillmentCreate"} {
+	for _, want := range []string{"ConnectTest", "Products", "Locations", "Levels", "Orders", "Order", "Contact", "StockTarget", "InventorySet", "VariantPrices", "FulfilmentOrders", "FulfillmentCreate",
+		"OrderCancel", "RefundState", "SuggestedRefund", "RefundCreate"} {
 		if !ops[want] {
 			t.Errorf("operation %s was never exercised", want)
 		}
@@ -211,5 +226,81 @@ func TestACredentialEchoedByTheShopNeverLeavesTheAdapter(t *testing.T) {
 	}
 	if strings.Contains(all, e.shop.Token()) {
 		t.Fatal("the token reached adapter output")
+	}
+}
+
+// The allow-list and the mutations in the code are the same set: a new
+// mutation cannot be added without naming it here, and a name here that no code
+// sends is a stale permission.
+func TestTheMutationAllowListIsExactlyTheMutationsTheCodeHas(t *testing.T) {
+	have := map[string]bool{}
+	for _, q := range app.AllQueries() {
+		if m := mutationName.FindStringSubmatch(q); m != nil {
+			have[m[1]] = true
+		}
+	}
+	for n := range have {
+		if !allowedMutations[n] {
+			t.Errorf("mutation %s is in the code and not on the allow-list", n)
+		}
+	}
+	for n := range allowedMutations {
+		if !have[n] {
+			t.Errorf("%s is on the allow-list and no query has it", n)
+		}
+	}
+}
+
+// AllQueries is kept by hand, so the allow-list above is exact only over what
+// it lists. These two tests read the source, so a mutation (or any operation)
+// added to the code and not to AllQueries cannot slip past every other test.
+func nonTestSources(t *testing.T) map[string]string {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no sources: %v", err)
+	}
+	out := map[string]string{}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[f] = string(b)
+	}
+	return out
+}
+
+func TestEveryQueryDefinitionIsInAllQueries(t *testing.T) {
+	n := 0
+	for _, src := range nonTestSources(t) {
+		n += strings.Count(src, "queryDef{") // any field order: an anonymous or reordered literal must still be counted
+	}
+	if n != len(app.AllQueries()) {
+		t.Fatalf("%d query definitions in the sources, AllQueries lists %d: add the new one to export_test.go so the pinning tests see it", n, len(app.AllQueries()))
+	}
+}
+
+var mutationInSource = regexp.MustCompile("[`\"]\\s*mutation\\b\\s*(\\w*)") // an anonymous `mutation { ... }` yields an empty name, which is never on the allow-list
+
+func TestEveryMutationNamedInTheSourceIsOnTheAllowList(t *testing.T) {
+	seen := 0
+	for f, src := range nonTestSources(t) {
+		for _, m := range mutationInSource.FindAllStringSubmatch(src, -1) {
+			seen++
+			if !allowedMutations[m[1]] {
+				t.Errorf("%s: mutation %s is not on the allow-list", f, m[1])
+			}
+		}
+		// A query flagged as a mutation must be a mutation text, and the reverse.
+		if got, want := strings.Count(src, "Mutation: true"), len(mutationInSource.FindAllString(src, -1)); got != want {
+			t.Errorf("%s: %d definitions flagged Mutation: true, %d mutation texts", f, got, want)
+		}
+	}
+	if seen != len(allowedMutations) {
+		t.Errorf("%d mutations in the sources, %d on the allow-list", seen, len(allowedMutations))
 	}
 }

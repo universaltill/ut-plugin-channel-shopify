@@ -26,10 +26,22 @@ hand-rolled `//go:wasmimport` lines. It runs only in the ut-cloud channel host
   cursor, a log field or an ack. Order queries do not select them; `qContact`
   is the one place that does, for the `contact` answer only. The customer is
   decoded for id and shipping country only.
-- **Nothing is ever deleted.** No delete/destroy/remove/cancel/refund operation
-  text (allow-list of mutations in `security_test.go`). `listing.unpublish` is not
-  done (items is `pull`; ut-docs#4774).
-  "Already done" (already fulfilled) is success.
+- **Nothing is ever deleted.** No delete/destroy/remove operation text; the
+  mutation allow-list in `security_test.go` is exact (`OrderCancel` and
+  `RefundCreate` are the only ones that may name cancel/refund, and only they).
+  `listing.unpublish` is not done (items is `pull`; ut-docs#4774). "Already
+  done" (fulfilled, cancelled, refunded to the target) is success.
+- **Cancel and refund are READ FIRST, never blind** (`writeback.go`): no
+  mutation until the order shows the effect is not there; a refund is the
+  delta to `refunded_to`, is refused BEFORE sending if Shopify's suggested
+  amount exceeds `max_amount_minor`, refuses another currency, never notifies
+  the buyer, and its note is a constant (no customer text). Extra payload
+  fields are tolerated, not required.
+- **No `order.cancel` / `refund.create` on a real shop until the `orderCancel`,
+  `job`, `suggestedRefund`, `refundCreate` (+ `@idempotent`) README rows pass on
+  a dev-store order** (money, names from memory). Cancel is acked only once the
+  order shows cancelled: job polled once, still running = retryable
+  `cancel_pending`, ended uncancelled = `cancel_failed`.
 - **Records are deterministic** (`external_version` = Shopify's `updatedAt`) so
   the host's idempotency gives "zero changes" on a second run. No clocks.
 - **Money** is integer minor units by string arithmetic (`money.go`); a

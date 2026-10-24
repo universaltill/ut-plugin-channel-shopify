@@ -444,17 +444,19 @@ func TestTheQueriesAskForOneMoreThanTheCapsTheyEnforce(t *testing.T) {
 // used from there: a correction after the dev-store run is one line.
 func TestFromMemoryShopifyNamesLiveInOnePlace(t *testing.T) {
 	all := strings.Join(app.AllQueries(), "\n")
-	for _, n := range []string{app.FLineAllocations, app.FOrderTax, app.FShippingLines, app.DIdempotent, app.FFOLocation} {
+	for _, n := range []string{app.FLineAllocations, app.FOrderTax, app.FShippingLines, app.DIdempotent, app.FFOLocation, app.MOrderCancel, app.MCancelJob, app.MRefundCreate, app.FSuggestedRefund, app.FOrderRefunds} {
 		if !strings.Contains(all, n) {
 			t.Errorf("%q is not in the query texts", n)
 		}
 	}
-	for _, f := range []string{"src/app/outbox.go", "src/app/orders.go", "src/app/catalogue.go"} {
+	for _, f := range []string{"src/app/outbox.go", "src/app/orders.go", "src/app/catalogue.go", "src/app/writeback.go"} {
 		b, err := os.ReadFile("../../" + f)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, lit := range []string{`"changeFromQuantity"`, `"ignoreCompareQuantity"`, "@idempotent", "assignedLocation {", "totalDiscountSet", "discountedTotalSet"} {
+		for _, lit := range []string{`"changeFromQuantity"`, `"ignoreCompareQuantity"`, "@idempotent", "assignedLocation {", "totalDiscountSet", "discountedTotalSet",
+			`"orderCancel"`, `"refundCreate"`, `"suggestedRefund"`, `"orderCancelUserErrors"`, `"lineItemId"`, `"locationId"`, `"parentId"`,
+			`"staffNote"`, `"notifyCustomer"`, `"CUSTOMER"`, `"INVENTORY"`, `"NO_RESTOCK"`, `"RETURN"`, `"CANCEL"`, `"PARTIALLY_FULFILLED"`, `"UNFULFILLED"`} {
 			if strings.Contains(string(b), lit) {
 				t.Errorf("%s spells the from-memory name %s itself: use the constant in queries.go", f, lit)
 			}

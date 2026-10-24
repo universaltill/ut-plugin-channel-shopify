@@ -300,7 +300,7 @@ func TestUnpublishIsNotActedOnAndIsDeadLetteredWithALoggedCode(t *testing.T) {
 func TestUnsupportedOperationsAreDeadLetteredWithoutARequest(t *testing.T) {
 	e := newEnv(t, fakeshop.Options{})
 	var ops []channel.OutboxOp
-	for i, k := range []string{channel.OpOrderCancel, channel.OpRefundCreate, channel.OpImageUpsert, "listing.delete", "product.delete", ""} {
+	for i, k := range []string{channel.OpImageUpsert, "listing.delete", "product.delete", ""} {
 		ops = append(ops, channel.OutboxOp{ID: fmt.Sprintf("u-%d", i), Kind: k, ExternalID: "gid://shopify/Order/5001", Payload: json.RawMessage(`{"reason":"other","restock":false}`)})
 	}
 	acks := e.outbox(ops...)

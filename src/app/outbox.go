@@ -26,11 +26,11 @@ func overBudget() bool {
 }
 
 // drainOutbox performs the pending outbound operations one at a time and
-// acknowledges each. The adapter has no delete and, for the MVP, no cancel or
-// refund: an operation it cannot or will not do is dead-lettered with a
-// non-retryable error. Writes that are safe to repeat carry the operation id
-// as their idempotency key; the fulfilment write is made safe by reading the
-// order first instead (see fulfil).
+// acknowledges each. The adapter has no delete: an operation it cannot or will
+// not do is dead-lettered with a non-retryable error. Writes that are safe to
+// repeat carry the operation id as their idempotency key; the fulfilment and
+// cancel writes are made safe by reading the order first instead (see fulfil,
+// orderCancel, refundCreate in writeback.go).
 func drainOutbox(channel.Event) (any, error) {
 	done := 0
 	var firstErr error
@@ -122,6 +122,10 @@ func perform(op channel.OutboxOp) channel.Ack {
 		return fulfil(op)
 	case channel.OpListingUpsert:
 		return listingUpsert(op)
+	case channel.OpOrderCancel:
+		return orderCancel(op)
+	case channel.OpRefundCreate:
+		return refundCreate(op)
 	}
 	// listing.unpublish is NOT done: the manifest declares items "pull", and an
 	// undeclared capability is never called (a draft is an item push, ut-docs#4774).
@@ -229,7 +233,7 @@ func stockSet(op channel.OutboxOp) channel.Ack {
 			return fail("rejected_by_channel", false)
 		}
 	}
-	line := map[string]any{"inventoryItemId": t.Node.Item.ID, "locationId": loc, "quantity": *p.Available}
+	line := map[string]any{"inventoryItemId": t.Node.Item.ID, kLocationID: loc, "quantity": *p.Available}
 	input := map[string]any{"name": "available", "reason": "correction", "quantities": []any{line}}
 	if op.Expect != nil && held {
 		line[fCompareField] = *op.Expect // compare-and-set on the last value the cloud saw
@@ -382,7 +386,7 @@ func fulfil(op channel.OutboxOp) channel.Ack {
 	// fulfilled is never sent again.
 	var failed *channel.Ack
 	for _, group := range groups {
-		input := map[string]any{"notifyCustomer": false, "lineItemsByFulfillmentOrder": group}
+		input := map[string]any{vNotifyCustomer: false, "lineItemsByFulfillmentOrder": group}
 		if len(tracking) > 0 {
 			input["trackingInfo"] = tracking
 		}

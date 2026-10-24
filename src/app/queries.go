@@ -40,6 +40,54 @@ const (
 	// fulfillment whose fulfilment orders sit at different locations, so the
 	// adapter sends one fulfillmentCreate per location.
 	fFOLocation = `assignedLocation { location { id } }`
+
+	// Cancel and refund (ut-docs#4774). The operation roots, the argument and
+	// input names, the enum values and the user-error fields of orderCancel,
+	// refundCreate and suggestedRefund, all written from memory of the Admin
+	// API 2026-10. README "Verify first on the dev store" has a row for each.
+	rOrderCancel  = `orderCancel`
+	rRefundCreate = `refundCreate`
+	rSuggested    = `suggestedRefund`
+	rJob          = `job`
+	// orderCancel is an asynchronous job in Shopify: the answer says the job
+	// was accepted. refund:true gives the buyer the money back (the cloud's
+	// confirmation marks every unit refunded); notifyCustomer stays false; the
+	// staff note is a constant, never customer text.
+	mOrderCancel = rOrderCancel + `(orderId: $orderId, reason: $reason, restock: $restock, refund: $refund, notifyCustomer: $notifyCustomer, staffNote: $staffNote) ` +
+		`{ job { id done } orderCancelUserErrors { field message } userErrors { field message } }`
+	fCancelUserErrors = `orderCancelUserErrors`
+	// The state of the cancel job, read once when orderCancel says it is not
+	// done. A Job has an id and a done flag and, as remembered, nothing that
+	// says how it ended: a job done without the order cancelled is how a
+	// failure shows (the order is read again).
+	mCancelJob = rJob + `(id: $id) { id done }`
+	// Text (lower case, a substring of the user error's message) of the answer
+	// orderCancel gives while an earlier cancel of the same order is still
+	// running. Written from memory: the wording is unverified.
+	cancelInProgressText = "in progress"
+	fUserErrors          = `userErrors`
+	// refundCreate takes the op id as Shopify's own idempotency key too
+	// (ADR-0169 section 3: mandatory on refund mutations).
+	mRefundCreate = rRefundCreate + `(input: $input) ` + dIdempotent + ` { refund { id } userErrors { field } }`
+	// What Shopify would refund for these lines: the amount (tax, discounts and
+	// rounding are Shopify's) and the transactions it proposes.
+	fSuggestedRefund = rSuggested + `(refundLineItems: $items) { amountSet { shopMoney { amount currencyCode } } ` +
+		`suggestedTransactions { gateway parentTransaction { id } amountSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } } } }`
+	// Input keys of refundCreate (RefundInput, RefundLineItemInput,
+	// OrderTransactionInput) and of orderCancel's variables.
+	kOrderID, kNotify, kNote, kRefundLines, kTransactions = "orderId", "notify", "note", "refundLineItems", "transactions"
+	kLineID, kQuantity, kRestockType, kLocationID         = "lineItemId", "quantity", "restockType", "locationId"
+	kParentID, kKind, kGateway, kAmount                   = "parentId", "kind", "gateway", "amount"
+	vReason, vRestock, vRefund, vNotifyCustomer, vNote    = "reason", "restock", "refund", "notifyCustomer", "staffNote"
+	// Enum values: OrderCancelReason, RefundLineItemRestockType, the transaction
+	// kind, and the display fulfilment statuses.
+	reasonCustomer, reasonInventory, reasonFraud, reasonOther = "CUSTOMER", "INVENTORY", "FRAUD", "OTHER"
+	restockReturn, restockCancel, restockNone                 = "RETURN", "CANCEL", "NO_RESTOCK"
+	kindRefund                                                = "REFUND"
+	statusUnfulfilled, statusFulfilled                        = "UNFULFILLED", "FULFILLED"
+	statusPartly, statusInProgress                            = "PARTIALLY_FULFILLED", "IN_PROGRESS"
+	// The refunds of an order and their lines, as the order query reads them.
+	fOrderRefunds = `refunds(first: ` + refundsAsked + `) { refundLineItems(first: ` + refundLinesAsked + `) { nodes { quantity restockType lineItem { id } } } }`
 )
 
 // How many refunds and refund lines per refund the order query reads. The
@@ -77,7 +125,7 @@ const orderFields = `id name createdAt updatedAt cancelledAt currencyCode taxesI
 	`totalRefundedSet { shopMoney { amount currencyCode } } ` +
 	fOrderTax + ` ` + fShippingLines + ` ` +
 	`customer { id } shippingAddress { countryCodeV2 } ` +
-	`refunds(first: ` + refundsAsked + `) { refundLineItems(first: ` + refundLinesAsked + `) { nodes { quantity restockType lineItem { id } } } } ` +
+	fOrderRefunds + ` ` +
 	`lineItems(first: $lfirst) { ` + pageInfo + ` nodes { ` + lineFields + ` } }`
 
 var (
@@ -131,4 +179,22 @@ var (
 
 	qFulfillmentCreate = queryDef{Name: "FulfillmentCreate", Cost: 10, Mutation: true, Text: `mutation FulfillmentCreate($fulfillment: FulfillmentInput!) { ` +
 		`fulfillmentCreate(fulfillment: $fulfillment) { userErrors { field } } }`}
+
+	// Cancel reads with qFulfilmentOrders (cancelledAt, display status).
+
+	qCancelJob = queryDef{Name: "CancelJob", Cost: 5, Text: `query CancelJob($id: ID!) { ` + mCancelJob + ` }`}
+
+	qOrderCancel = queryDef{Name: "OrderCancel", Cost: 10, Mutation: true, Text: `mutation OrderCancel($orderId: ID!, $reason: OrderCancelReason!, $restock: Boolean!, ` +
+		`$refund: Boolean!, $notifyCustomer: Boolean, $staffNote: String) { ` + mOrderCancel + ` }`}
+
+	// RefundState is what a refund reads first: is the order cancelled, in which
+	// currency, how fulfilled and where (for a return), and what is already
+	// refunded per line.
+	qRefundState = queryDef{Name: "RefundState", Cost: 150, Text: `query RefundState($id: ID!) { order(id: $id) { ` +
+		`cancelledAt currencyCode displayFulfillmentStatus ` + fOrderRefunds + ` fulfillmentOrders(first: 10) { nodes { id status ` + fFOLocation + ` } } } }`}
+
+	qSuggestedRefund = queryDef{Name: "SuggestedRefund", Cost: 40, Text: `query SuggestedRefund($id: ID!, $items: [RefundLineItemInput!]!) { order(id: $id) { ` +
+		fSuggestedRefund + ` } }`}
+
+	qRefundCreate = queryDef{Name: "RefundCreate", Cost: 10, Mutation: true, Text: `mutation RefundCreate($input: RefundInput!, $key: String!) { ` + mRefundCreate + ` }`}
 )
