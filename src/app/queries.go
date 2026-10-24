@@ -66,6 +66,11 @@ const (
 	// running. Written from memory: the wording is unverified.
 	cancelInProgressText = "in progress"
 	fUserErrors          = `userErrors`
+	// The price push reads the variant first: the cloud's external id for an
+	// item is the VARIANT id, so the product to update comes from here.
+	// productVariant(id:), its product { id } and price (a decimal string) are
+	// written from memory: README row "productVariant(id:)".
+	mVariantLookup = `productVariant(id: $id) { id product { id } price }`
 	// refundCreate takes the op id as Shopify's own idempotency key too
 	// (ADR-0169 section 3: mandatory on refund mutations).
 	mRefundCreate = rRefundCreate + `(input: $input) ` + dIdempotent + ` { refund { id } userErrors { field } }`
@@ -170,6 +175,8 @@ var (
 
 	qInventoryActivate = queryDef{Name: "InventoryActivate", Cost: 10, Mutation: true, Text: `mutation InventoryActivate($item: ID!, $loc: ID!) { ` +
 		`inventoryActivate(inventoryItemId: $item, locationId: $loc) { userErrors { field } } }`}
+
+	qVariantPrice = queryDef{Name: "VariantPrice", Cost: 5, Text: `query VariantPrice($id: ID!) { ` + mVariantLookup + ` }`}
 
 	qVariantPrices = queryDef{Name: "VariantPrices", Cost: 20, Mutation: true, Text: `mutation VariantPrices($productId: ID!, $variants: [ProductVariantsBulkInput!]!) { ` +
 		`productVariantsBulkUpdate(productId: $productId, variants: $variants) { userErrors { code } } }`}

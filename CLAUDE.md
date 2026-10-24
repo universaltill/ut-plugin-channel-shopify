@@ -29,7 +29,7 @@ hand-rolled `//go:wasmimport` lines. It runs only in the ut-cloud channel host
 - **Nothing is ever deleted.** No delete/destroy/remove operation text; the
   mutation allow-list in `security_test.go` is exact (`OrderCancel` and
   `RefundCreate` are the only ones that may name cancel/refund, and only they).
-  `listing.unpublish` is not done (items is `pull`; ut-docs#4774). "Already
+  `listing.unpublish` is not done (ut-docs#4774). "Already
   done" (fulfilled, cancelled, refunded to the target) is success.
 - **Cancel and refund are READ FIRST, never blind** (`writeback.go`): no
   mutation until the order shows the effect is not there; a refund is the
@@ -42,6 +42,16 @@ hand-rolled `//go:wasmimport` lines. It runs only in the ut-cloud channel host
   a dev-store order** (money, names from memory). Cancel is acked only once the
   order shows cancelled: job polled once, still running = retryable
   `cancel_pending`, ended uncancelled = `cancel_failed`.
+- **`items` is `both`, and the adapter pushes prices only.** The cloud queues
+  `listing.upsert` only for push/both, so `pull` would leave the variant-price
+  push unreachable (ADR-0169 criterion 6; `scripts/validate.sh` pins `both`).
+  The op's external id is the Shopify VARIANT id (the cloud's listing id): the
+  adapter reads the variant (and its product), pushes that one variant's price
+  and acks the variant id unchanged. Price <= 0 is `invalid_price`; `tax_included: true` while the shop's prices exclude tax is `tax_basis_mismatch` (the opposite is a legitimate non-taxable variant); the rest of
+  the record is ignored (logged once per ask, successes only, no PII); an upsert
+  without an external id is a create: refused non-retryably with
+  `create_not_supported`, nothing sent. Never add item creation here without
+  ut-docs#4774.
 - **Records are deterministic** (`external_version` = Shopify's `updatedAt`) so
   the host's idempotency gives "zero changes" on a second run. No clocks.
 - **Money** is integer minor units by string arithmetic (`money.go`); a

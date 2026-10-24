@@ -28,7 +28,7 @@ development store and the app credentials the owner has to create (card
 | `channel.import.ask` | Pages through products with variants (Admin GraphQL, cursor paging), then through every location's inventory levels. Submits `listing` and `stock_observed` records. Resumable through cursors; records are deterministic (`external_version` is Shopify's `updatedAt`) so a second import is byte-identical and the host reports zero changes. |
 | `channel.fetch.ask` / `channel.tick` | Re-fetch named orders / sweep orders updated since the `orders.since` cursor and submit contract `order` records with **no customer name, address, email or phone**. |
 | `channel.contact.ask` | Fetches an order's contact details live for display; never stored, submitted or logged. |
-| `channel.outbox.ask` | `stock.set` (absolute, compare-and-set on `expect`, inactive levels activated, a stale `expect` reports the shop's value and pulls recent orders), `fulfilment.create` (shipped with carrier and tracking), `order.cancel` and `refund.create` (below), `listing.upsert` (variant prices only). Anything else is dead-lettered with `unsupported_op` and a logged `outbox.unsupported_op`: a delete, and `listing.unpublish` (a product draft is an item push, and `items` is `pull`: card ut-docs#4774 adds it with the right declaration). Nothing is ever deleted. |
+| `channel.outbox.ask` | `stock.set` (absolute, compare-and-set on `expect`, inactive levels activated, a stale `expect` reports the shop's value and pulls recent orders), `fulfilment.create` (shipped with carrier and tracking), `order.cancel` and `refund.create` (below), `listing.upsert` (one variant's price: the op's external id is the Shopify VARIANT id, as the cloud sends it; the variant is read first, then its own product is updated; a price that already matches is acked without a write; a zero or negative price is refused `invalid_price`, another currency `currency_mismatch`, an unknown variant `not_found`, all non-retryable; other fields are ignored without error and logged once per ask, on success only, as `listing.fields_ignored`; the ack keeps the variant id; an upsert without an external id is a create and is refused with the non-retryable `create_not_supported`, nothing sent). Anything else is dead-lettered with `unsupported_op` and a logged `outbox.unsupported_op`: a delete, and `listing.unpublish` (a product draft is an item push: card ut-docs#4774). Nothing is ever deleted. |
 
 The plugin has **no account name, no credential and no network of its own**.
 Its only network path is `channel_http` to one URL,
@@ -78,13 +78,23 @@ connection's verified account and adds the access token.
   refused with the logged reason `too_many_refunds`, never under-counted. A
   payment state that is not paid (`PARTIALLY_PAID`) is `pending`; `EXPIRED` is
   `voided`.
-- **Capabilities** are declared honestly: `items: pull`, `variants: both`
-  (price pushed to an existing variant), `stock: both`, `orders: pull`,
-  `fulfilment: push`, `cancel: push`, `refunds: push`. The adapter cannot create or edit an item (ut-docs#4774),
-  so it does not declare `items` push; the cloud would otherwise queue
-  `listing.upsert` for every new item and dead-letter it. For the same reason
-  it does not act on `listing.unpublish` (an undeclared capability is never
-  called); ut-docs#4774 adds it together with `items: both`.
+- **Capabilities**: `items: both`, `variants: both`, `stock: both`,
+  `orders: pull`, `fulfilment: push`, `cancel: push`, `refunds: push`. `items`
+  is `both` because the cloud queues `listing.upsert` only for push/both: with
+  `pull` a Universal Till price edit would never be queued and could not reach
+  Shopify. What the adapter then does with it: the cloud's external id for an
+  imported item is the Shopify variant id, so an upsert reads that variant
+  (and its product), then pushes the one variant's price (another currency is
+  refused, never converted; a zero or negative price is refused as
+  `invalid_price`; a variant that no longer exists is `not_found`). Title,
+  description, category and image are ignored (acknowledged as success;
+  `listing.fields_ignored` is logged once per ask, for successes only).
+  `listing.unpublish` is not done (`unsupported_op`, no mutation). Nothing
+  here has run against a real store: see "Verify first on the dev store".
+- **Known limits**: an item the owner published from Universal Till (no
+  external id yet) is a create, which the adapter cannot do (ut-docs#4774): it
+  is refused with the non-retryable `create_not_supported`, nothing is sent to
+  Shopify, and today it shows only as a failed operation.
 - **Per-ask budgets** (`src/app/budget.go`). The host gives every ask but import
   a 30 second deadline (import 5 minutes) and kills a run at it. The budgets are
   call-count and Shopify-point accounting **inside the plugin**; the host does
@@ -173,6 +183,8 @@ and a test keeps them there. First run on the development store, in this order:
 
 | Name / assumption | Where | What failing looks like |
 |---|---|---|
+| `productVariant(id:) { id product { id } price }` returns the variant's own product and its price as a decimal string (the price push reads it first, because the cloud's external id is the variant id) | `mVariantLookup`, `qVariantPrice` | Edit the price of an imported item in Universal Till and wait for the sweep: failing looks like the op dead-lettering `not_found` for a variant that exists, or every price op dead-lettering `rejected_by_channel` with a logged `outbox.graphql_error`. Also check a second identical push makes no change (the read sees the same price and sends no write). |
+| `productVariantsBulkUpdate(productId:, variants: [{id, price}])` takes a bare decimal `price` and changes only that field (compare-at is untouched) | `qVariantPrices` | Edit the Universal Till price of an imported product (one that came from Shopify), wait for the sweep, then read the variant price in Shopify (admin or `productVariant(id:) { price compareAtPrice }`). Failing looks like the op dead-lettering (`rejected_by_channel` with a logged `outbox.graphql_error`, or `currency_mismatch` when the shop currency differs from the till's) or the price not changing. Also check the compare-at price: the adapter does NOT refuse a pushed price above the variant's compare-at, so look in the admin for a product that now shows a nonsensical "sale" (compare-at below the price) and decide whether the shop should clear it, and that every real push logs `listing.fields_ignored` once per ask (the cloud always sends name, description, status, sku and barcodes; the count is of those content fields only, never of structural keys) while the price still changes. A payload that says `tax_included: true` while the shop's prices exclude tax dead-letters `tax_basis_mismatch` and writes nothing. An item published from Universal Till (no Shopify id) must show a `create_not_supported` dead letter and nothing new in Shopify. |
 | `changeFromQuantity` (or `compareQuantity`) in `inventorySetQuantities`, and `ignoreCompareQuantity` | `fCompareField`, `fCompareOff` | `userErrors` / a GraphQL schema error on every `stock.set` with `expect`: ops dead-letter as `rejected_by_channel`. Or no stale detection: a stale write goes through. |
 | `@idempotent(key:)` on `inventorySetQuantities` | `dIdempotent` | A GraphQL error "directive not defined" on every `stock.set`. The `Idempotency-Key` header is **not** a Shopify feature: it only tells the host the POST may be re-sent. |
 | `discountAllocations { allocatedAmountSet }` on a line is the COMPLETE list of discounts (the line's own and its share of an order-level code) | `fLineAllocations` | `order.refused.total_mismatch` or `bad_line` for an order with a discount code. Check one order with a line discount and one with a code. |

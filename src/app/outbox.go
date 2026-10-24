@@ -127,8 +127,8 @@ func perform(op channel.OutboxOp) channel.Ack {
 	case channel.OpRefundCreate:
 		return refundCreate(op)
 	}
-	// listing.unpublish is NOT done: the manifest declares items "pull", and an
-	// undeclared capability is never called (a draft is an item push, ut-docs#4774).
+	// listing.unpublish is NOT done: the adapter cannot set a product to draft
+	// (an item push, ut-docs#4774) although items is "both".
 	// Nothing else is done either; the op is dead-lettered with a logged code.
 	hostLog(channel.LevelWarn, "outbox.unsupported_op", map[string]any{"kind": clip(strings.ToValidUTF8(op.Kind, ""), 40)})
 	return fail("unsupported_op", false)
@@ -450,19 +450,40 @@ func trackingURL(raw string) string {
 	return raw
 }
 
-// listingUpsert pushes prices to existing variants. Creating a product,
-// titles, descriptions, images, compare-at prices and categories are
-// ut-docs#4774. A price in another currency than the shop's is refused, not
-// converted (ADR-0169 section 7).
+// listingUpsert pushes the price of an EXISTING variant. The manifest declares
+// items "both" so the cloud queues price edits (ADR-0169 criterion 6). The
+// cloud's external id for an imported item is the Shopify VARIANT id, in
+// op.ExternalID and in variants[0].external_id; the product to update is read
+// from the variant. The record also carries fields this adapter does not push
+// (title, description, category, image, compare-at): ignored, counted once per
+// ask on success only. A create (no external id) is refused for good before any
+// request: the adapter cannot create products (ut-docs#4774). A price in
+// another currency than the shop's is refused, not converted (ADR-0169 section
+// 7); a zero or negative price is refused (a live product must not go free).
+// The ack keeps op.ExternalID (the variant id): the cloud stores it on the
+// listing.
 func listingUpsert(op channel.OutboxOp) channel.Ack {
+	if op.ExternalID == "" {
+		hostLog(channel.LevelWarn, "listing.create_not_supported", nil)
+		return fail("create_not_supported", false)
+	}
 	var p struct {
 		Variants []struct {
 			ExternalID string `json:"external_id"`
 			PriceMinor int64  `json:"price_minor"`
 			Currency   string `json:"currency"`
+			TaxIncl    bool   `json:"tax_included"`
 		} `json:"variants"`
 	}
-	if !okGID(tProduct, op.ExternalID) || json.Unmarshal(op.Payload, &p) != nil || len(p.Variants) == 0 || len(p.Variants) > maxVariants {
+	if !okGID(tVariant, op.ExternalID) || json.Unmarshal(op.Payload, &p) != nil || len(p.Variants) != 1 ||
+		p.Variants[0].ExternalID != op.ExternalID || !curRe.MatchString(p.Variants[0].Currency) {
+		return fail("invalid_payload", false)
+	}
+	want := p.Variants[0]
+	if want.PriceMinor <= 0 {
+		return fail("invalid_price", false)
+	}
+	if want.PriceMinor > 999_999_999_999 {
 		return fail("invalid_payload", false)
 	}
 	var shop struct {
@@ -471,30 +492,92 @@ func listingUpsert(op channel.OutboxOp) channel.Ack {
 	if err := run(qShopCurrency, nil, "", &shop); err != nil {
 		return failFor(err)
 	}
-	var inputs []map[string]any
-	for _, v := range p.Variants {
-		if !okGID(tVariant, v.ExternalID) || v.PriceMinor < 0 || v.PriceMinor > 999_999_999_999 || !curRe.MatchString(v.Currency) {
-			return fail("invalid_payload", false)
-		}
-		if v.Currency != shop.Shop.Currency {
-			return fail("currency_mismatch", false)
-		}
-		inputs = append(inputs, map[string]any{"id": v.ExternalID, "price": formatMoney(v.PriceMinor, v.Currency)})
+	if want.Currency != shop.Shop.Currency {
+		return fail("currency_mismatch", false)
+	}
+	// Tax basis. variants[0].tax_included is the basis the cloud recorded for
+	// this item at import (the shop's taxesIncluded AND the variant taxable) and
+	// the price is in that basis (ut-cloud channelsync/outbound.go build). Only
+	// one mismatch is unambiguous: the cloud says "tax included" but the shop's
+	// prices now EXCLUDE tax (a stale link). Pushing would put a tax-inclusive
+	// number where Shopify adds tax on top, so the customer pays tax twice.
+	// "false" in a tax-included shop is legitimate (a non-taxable variant has
+	// no tax to include, catalogue.go), so it is never refused.
+	if want.TaxIncl && !shop.Shop.TaxesIncluded {
+		return fail("tax_basis_mismatch", false)
+	}
+	var cur struct {
+		Variant *struct {
+			ID      string `json:"id"`
+			Product *struct {
+				ID string `json:"id"`
+			} `json:"product"`
+			Price string `json:"price"`
+		} `json:"productVariant"`
+	}
+	if err := run(qVariantPrice, map[string]any{"id": op.ExternalID}, "", &cur); err != nil {
+		return failFor(err)
+	}
+	if cur.Variant == nil || cur.Variant.Product == nil || cur.Variant.ID != op.ExternalID || !okGID(tProduct, cur.Variant.Product.ID) {
+		return fail("not_found", false)
+	}
+	if now, ok := parseMoney(cur.Variant.Price, want.Currency); ok && now == want.PriceMinor {
+		logFieldsIgnored(op)
+		return channel.Ack{ExternalID: op.ExternalID} // already there: no write
 	}
 	var r struct {
 		Update struct {
 			Errors []userError `json:"userErrors"`
 		} `json:"productVariantsBulkUpdate"`
 	}
+	inputs := []map[string]any{{"id": op.ExternalID, "price": formatMoney(want.PriceMinor, want.Currency)}}
 	// An absolute price is safe to repeat, so the host may re-send it.
-	if err := run(qVariantPrices, map[string]any{"productId": op.ExternalID, "variants": inputs}, op.ID, &r); err != nil {
+	if err := run(qVariantPrices, map[string]any{"productId": cur.Variant.Product.ID, "variants": inputs}, op.ID, &r); err != nil {
 		return failFor(err)
 	}
 	switch code := userErrCode(r.Update.Errors); {
 	case code == "":
+		logFieldsIgnored(op)
 		return channel.Ack{ExternalID: op.ExternalID}
 	case strings.Contains(code, "DOES_NOT_EXIST"):
 		return fail("not_found", false)
 	}
 	return fail("rejected_by_channel", false)
+}
+
+// Content fields of a listing record that this adapter does not push. Only
+// these are counted: structural keys (cloud_id, external_id, variants,
+// currency, price_minor, tax_included) are not fields the owner edited.
+var (
+	ignoredTop     = []string{"name", "description", "status", "category_path", "category", "images", "image", "tags"}
+	ignoredVariant = []string{"sku", "barcodes", "compare_at_minor"}
+)
+
+// logFieldsIgnored counts, once per ask and only for an op that succeeded, the
+// content fields the listing record carried that this adapter does not push.
+func logFieldsIgnored(op channel.OutboxOp) {
+	var all struct {
+		Variants []map[string]json.RawMessage `json:"variants"`
+	}
+	var top map[string]json.RawMessage
+	if spent.ignoredLogged || json.Unmarshal(op.Payload, &top) != nil || json.Unmarshal(op.Payload, &all) != nil {
+		return
+	}
+	n := 0
+	for _, k := range ignoredTop {
+		if _, ok := top[k]; ok {
+			n++
+		}
+	}
+	for _, v := range all.Variants {
+		for _, k := range ignoredVariant {
+			if _, ok := v[k]; ok {
+				n++
+			}
+		}
+	}
+	if n > 0 {
+		spent.ignoredLogged = true
+		hostLog(channel.LevelInfo, "listing.fields_ignored", map[string]any{"count": n})
+	}
 }

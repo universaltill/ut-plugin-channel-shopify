@@ -69,3 +69,56 @@ func writeBack(probe *fakeshop.Shop) *conformance.WriteBack {
 		},
 	}
 }
+
+// createRefusal is the Shopify-specific rule for a manifest that declares items
+// "both" while the adapter cannot create products (ut-docs#4774): a create
+// (listing.upsert without an external id) is refused for good with
+// create_not_supported and puts NOTHING on the wire. It lives here, not in
+// suite.go, which stays a copy of the demo repo's suite.
+func createRefusal(t testing.TB, tg conformance.Target) []string {
+	t.Helper()
+	var v []string
+	shop := tg.NewShop()
+	em := conformance.NewEmulator(t, tg.Handlers, shop, tg.Account, tg.CredentialHeader, tg.Credential)
+	em.Host.Outbox = append(em.Host.Outbox, channel.OutboxOp{ID: "create-1", Kind: channel.OpListingUpsert, ExternalID: "",
+		Payload: json.RawMessage(`{"name":"Owner published","variants":[{"external_id":"","price_minor":500,"currency":"GBP"}]}`)})
+	if r := em.Ask(channel.AskOutbox, struct{}{}); r.Err != nil {
+		return append(v, "outbox ask: "+r.Err.Error())
+	}
+	a, ok := em.Host.Acks["create-1"]
+	switch {
+	case !ok:
+		v = append(v, "a create was not answered")
+	case a.Error == nil:
+		v = append(v, "a create was acknowledged as success")
+	case a.Error.Code != "create_not_supported" || a.Error.Retryable:
+		v = append(v, "a create must be refused non-retryably with create_not_supported, got "+a.Error.Code)
+	}
+	for _, s := range em.Seen() {
+		if isMutation(s) {
+			v = append(v, "a refused create sent a write: "+s.URL)
+		}
+	}
+	return v
+}
+
+func TestTheRealAdapterRefusesACreateAndWritesNothing(t *testing.T) {
+	if got := createRefusal(t, shopifyTarget()); len(got) != 0 {
+		t.Fatal(got)
+	}
+}
+
+// The self-test: an adapter that creates blindly (a write, then success) fails it.
+func TestCreateRefusalCheckCatchesAnAdapterThatCreatesBlindly(t *testing.T) {
+	tg := broken(channel.Handlers{channel.AskOutbox: func(channel.Event) (any, error) {
+		ops, _ := channel.OutboxNext(10)
+		for _, op := range ops {
+			post("VariantPrices", priceMutation, map[string]any{"productId": "gid://shopify/Product/1001", "variants": []map[string]any{{"id": "gid://shopify/ProductVariant/2010", "price": "5.00"}}}, 10)
+			_ = channel.OutboxAck(op.ID, channel.Ack{ExternalID: "gid://shopify/Product/9"})
+		}
+		return nil, nil
+	}})
+	got := createRefusal(t, tg)
+	wantViolation(t, got, "acknowledged as success")
+	wantViolation(t, got, "sent a write")
+}

@@ -160,6 +160,7 @@ type Shop struct {
 	mu           sync.Mutex
 	opt          Options
 	h            hostile
+	lookup       string // VariantPrice answer shape: "", "foreign", "noproduct"
 	products     []product
 	locations    []string
 	levels       map[string]*level // variantID + "@" + locationID
@@ -345,6 +346,14 @@ func (s *Shop) Handler() http.Handler { return http.HandlerFunc(s.serve) }
 
 // ServeHTTP makes a Shop an http.Handler.
 func (s *Shop) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.serve(w, r) }
+
+// SetVariantLookup makes the productVariant read answer wrongly: "foreign" (a
+// different variant id) or "noproduct" (no product); "" restores it.
+func (s *Shop) SetVariantLookup(mode string) {
+	s.mu.Lock()
+	s.lookup = mode
+	s.mu.Unlock()
+}
 
 // Hostile switches one mode on by the conformance suite's name for it.
 func (s *Shop) Hostile(mode string) {

@@ -148,6 +148,17 @@ func (s *Shop) dispatch(req gqlRequest) (any, string) {
 			}
 		}
 		return obj{"inventoryActivate": obj{"userErrors": []obj{{"field": []string{"inventoryItemId"}}}}}, ""
+	case "VariantPrice":
+		if v, pr := s.findVariant(s.str(req, "id")); v != nil {
+			switch s.lookup {
+			case "foreign": // answers with another variant than the one asked for
+				return obj{"productVariant": obj{"id": gid("ProductVariant", 999999), "product": obj{"id": pr.ID}, "price": v.Price}}, ""
+			case "noproduct": // a variant whose product is gone
+				return obj{"productVariant": obj{"id": v.ID, "product": nil, "price": v.Price}}, ""
+			}
+			return obj{"productVariant": obj{"id": v.ID, "product": obj{"id": pr.ID}, "price": v.Price}}, ""
+		}
+		return obj{"productVariant": nil}, ""
 	case "VariantPrices":
 		return s.opPrices(req), ""
 	case "FulfilmentOrders":
