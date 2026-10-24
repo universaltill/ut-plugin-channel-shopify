@@ -24,7 +24,7 @@ import (
 var mutationName = regexp.MustCompile(`^mutation (\w+)`)
 
 var allowedMutations = map[string]bool{
-	"InventorySet": true, "InventoryActivate": true, "VariantPrices": true, "FulfillmentCreate": true,
+	"InventorySet": true, "InventoryActivate": true, "VariantPrices": true, "ProductType": true, "FulfillmentCreate": true,
 	// ut-docs#4774: a cancel keeps the order and a refund adds a refund; neither deletes.
 	"OrderCancel": true, "RefundCreate": true,
 }

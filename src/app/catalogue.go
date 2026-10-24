@@ -27,11 +27,12 @@ type pageInfoT struct {
 }
 
 type gqlVariant struct {
-	ID              string `json:"id"`
-	SKU             string `json:"sku"`
-	Barcode         string `json:"barcode"`
-	Price           string `json:"price"`
-	Taxable         bool   `json:"taxable"`
+	ID              string  `json:"id"`
+	SKU             string  `json:"sku"`
+	Barcode         string  `json:"barcode"`
+	Price           string  `json:"price"`
+	CompareAtPrice  *string `json:"compareAtPrice"`
+	Taxable         bool    `json:"taxable"`
 	SelectedOptions []struct {
 		Name  string `json:"name"`
 		Value string `json:"value"`
@@ -46,7 +47,40 @@ type gqlVariants struct {
 	Nodes    []gqlVariant `json:"nodes"`
 }
 
+// gqlCategorised is what a product says about its category (ut-docs#4944).
+type gqlCategorised struct {
+	ProductType string `json:"productType"`
+	Category    *struct {
+		Name string `json:"name"`
+	} `json:"category"`
+	Collections struct {
+		Nodes []struct {
+			Title string `json:"title"`
+		} `json:"nodes"`
+	} `json:"collections"`
+}
+
+// single is the ONE category a till item has (ut-docs#4944): the merchant's
+// product type, else the standard category's name, else the first collection,
+// else "". The other collections stay in Shopify. Push and import share this,
+// so what import would read is never written back.
+func (c gqlCategorised) single() string {
+	if s := categoryName(c.ProductType); s != "" {
+		return s
+	}
+	if c.Category != nil {
+		if s := categoryName(c.Category.Name); s != "" {
+			return s
+		}
+	}
+	if len(c.Collections.Nodes) > 0 {
+		return categoryName(c.Collections.Nodes[0].Title)
+	}
+	return ""
+}
+
 type gqlProduct struct {
+	gqlCategorised
 	ID          string      `json:"id"`
 	Title       string      `json:"title"`
 	Description string      `json:"description"`
@@ -190,6 +224,9 @@ func mapProduct(p *gqlProduct, shop shopInfo) (channel.Listing, string) {
 		Identity: channel.Identity{ExternalID: p.ID, ExternalVersion: p.UpdatedAt},
 		Title:    clip(p.Title, 255), Description: clip(p.Description, 5000), Status: listingStatus(p.Status),
 	}
+	if c := p.single(); c != "" {
+		l.CategoryPath = []string{c}
+	}
 	for _, v := range p.Variants.Nodes {
 		price, ok := parseMoney(v.Price, shop.Currency)
 		if !okGID(tVariant, v.ID) || !ok {
@@ -198,6 +235,11 @@ func mapProduct(p *gqlProduct, shop shopInfo) (channel.Listing, string) {
 		out := channel.Variant{
 			ExternalID: v.ID, SKU: clip(v.SKU, 100), PriceMinor: price, Currency: shop.Currency,
 			TaxIncluded: shop.TaxesIncluded && v.Taxable, Tracked: v.InventoryItem.Tracked,
+		}
+		if v.CompareAtPrice != nil {
+			if c, ok := parseMoney(*v.CompareAtPrice, shop.Currency); ok && c > 0 {
+				out.CompareAtMinor = c
+			}
 		}
 		if v.Barcode != "" {
 			out.Barcodes = []string{clip(v.Barcode, 64)}

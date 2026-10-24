@@ -43,6 +43,23 @@ const (
 	// adapter sends one fulfillmentCreate per location.
 	fFOLocation = `assignedLocation { location { id } }`
 
+	// The category of a product (ut-docs#4944): the merchant's free-text
+	// productType, the standard category (an object: only its name is read)
+	// and the FIRST collection. collections needs first/last. Verified read-only
+	// against the Admin API 2026-10 (README rows).
+	fCategory = `productType category { name } collections(first: 1) { nodes { title } }`
+	// The compare-at price of a variant (decimal string or null).
+	fCompareAt = `compareAtPrice`
+	// productUpdate takes product: ProductUpdateInput!; the adapter sets
+	// productType and nothing else (never a collection, never the standard
+	// category). The payload's userErrors are UserError: field and message,
+	// no code.
+	mProductType             = `productUpdate(product: $product) { userErrors { field } }`
+	kProductID, kProductType = "id", "productType"
+	// Suffix that gives the productType write of one listing.upsert op its own
+	// idempotency key (the price write uses the op id).
+	keyType = ":type"
+
 	// Cancel and refund (ut-docs#4774). The operation roots, the argument and
 	// input names, the enum values and the user-error fields of orderCancel,
 	// refundCreate and suggestedRefund, all written from memory of the Admin
@@ -72,7 +89,7 @@ const (
 	// item is the VARIANT id, so the product to update comes from here.
 	// productVariant(id:), its product { id } and price (a decimal string) are
 	// written from memory: README row "productVariant(id:)".
-	mVariantLookup = `productVariant(id: $id) { id product { id } price }`
+	mVariantLookup = `productVariant(id: $id) { id product { id ` + fCategory + ` } price }`
 	// refundCreate takes the op id as Shopify's own idempotency key too
 	// (ADR-0169 section 3: mandatory on refund mutations).
 	mRefundCreate = rRefundCreate + `(input: $input) ` + dIdempotent + ` { refund { id } userErrors { field } }`
@@ -115,7 +132,7 @@ const (
 	maxLocations = 20
 )
 
-const variantFields = `id sku barcode price taxable selectedOptions { name value } inventoryItem { tracked }`
+const variantFields = `id sku barcode price ` + fCompareAt + ` taxable selectedOptions { name value } inventoryItem { tracked }`
 
 const pageInfo = `pageInfo { hasNextPage endCursor }`
 
@@ -141,7 +158,7 @@ var (
 
 	qProducts = queryDef{Name: "Products", Cost: 700, Text: `query Products($first: Int!, $after: String, $vfirst: Int!) { ` +
 		`shop { currencyCode taxesIncluded } products(first: $first, after: $after, sortKey: ID) { ` + pageInfo +
-		` nodes { id title description status updatedAt variants(first: $vfirst) { ` + pageInfo + ` nodes { ` + variantFields + ` } } } } }`}
+		` nodes { id title description status updatedAt ` + fCategory + ` variants(first: $vfirst) { ` + pageInfo + ` nodes { ` + variantFields + ` } } } } }`}
 
 	qMoreVariants = queryDef{Name: "MoreVariants", Cost: 200, Text: `query MoreVariants($id: ID!, $first: Int!, $after: String) { ` +
 		`node(id: $id) { ... on Product { variants(first: $first, after: $after) { ` + pageInfo + ` nodes { ` + variantFields + ` } } } } }`}
@@ -178,6 +195,8 @@ var (
 		`inventoryActivate(inventoryItemId: $item, locationId: $loc) ` + dIdempotent + ` { userErrors { field } } }`}
 
 	qVariantPrice = queryDef{Name: "VariantPrice", Cost: 5, Text: `query VariantPrice($id: ID!) { ` + mVariantLookup + ` }`}
+
+	qProductType = queryDef{Name: "ProductType", Cost: 10, Mutation: true, Text: `mutation ProductType($product: ProductUpdateInput!) { ` + mProductType + ` }`}
 
 	qVariantPrices = queryDef{Name: "VariantPrices", Cost: 20, Mutation: true, Text: `mutation VariantPrices($productId: ID!, $variants: [ProductVariantsBulkInput!]!) { ` +
 		`productVariantsBulkUpdate(productId: $productId, variants: $variants) { userErrors { code } } }`}

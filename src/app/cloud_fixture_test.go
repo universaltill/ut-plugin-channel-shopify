@@ -181,7 +181,8 @@ func TestPricePushRequestsAllCarryACostHint(t *testing.T) {
 			t.Errorf("cost hint %d for %.60s", s.CostHint, s.Body)
 		}
 	}
-	if len(e.em.Seen()) != 3 {
-		t.Errorf("%d requests, want ShopCurrency + VariantPrice + VariantPrices", len(e.em.Seen()))
+	// The cloud's record carries a category path, so the product type follows.
+	if len(e.em.Seen()) != 4 {
+		t.Errorf("%d requests, want ShopCurrency + VariantPrice + VariantPrices + ProductType", len(e.em.Seen()))
 	}
 }

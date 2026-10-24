@@ -444,7 +444,7 @@ func TestTheQueriesAskForOneMoreThanTheCapsTheyEnforce(t *testing.T) {
 // used from there: a correction after the dev-store run is one line.
 func TestFromMemoryShopifyNamesLiveInOnePlace(t *testing.T) {
 	all := strings.Join(app.AllQueries(), "\n")
-	for _, n := range []string{app.FLineAllocations, app.FOrderTax, app.FShippingLines, app.DIdempotent, app.FFOLocation, app.MOrderCancel, app.MCancelJob, app.MRefundCreate, app.FSuggestedRefund, app.FOrderRefunds} {
+	for _, n := range []string{app.FLineAllocations, app.FOrderTax, app.FShippingLines, app.DIdempotent, app.FFOLocation, app.MOrderCancel, app.MCancelJob, app.MRefundCreate, app.FSuggestedRefund, app.FOrderRefunds, app.FCategory, app.FCompareAt, app.MProductType} {
 		if !strings.Contains(all, n) {
 			t.Errorf("%q is not in the query texts", n)
 		}
