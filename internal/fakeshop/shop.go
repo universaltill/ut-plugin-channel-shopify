@@ -157,22 +157,35 @@ type Request struct {
 
 // Shop is the server. Use Handler (or the Shop itself) to serve it.
 type Shop struct {
-	mu        sync.Mutex
-	opt       Options
-	h         hostile
-	products  []product
-	locations []string
-	levels    map[string]*level // variantID + "@" + locationID
-	orders    []Order
-	reqs      []Request
-	writes    int
-	calls     int
-	idem      map[string]string // idempotency key -> cached mutation answer
-	acts      map[string]int    // "<kind>:<id>" -> times performed
-	failFO    map[string]bool   // fulfilment orders whose fulfillment is refused
-	schemaErr map[string]bool   // operations answered with a schema error
-	codes     map[string]bool
-	tracking  map[string][3]string
+	mu           sync.Mutex
+	opt          Options
+	h            hostile
+	products     []product
+	locations    []string
+	levels       map[string]*level // variantID + "@" + locationID
+	orders       []Order
+	reqs         []Request
+	writes       int
+	calls        int
+	idem         map[string]string // idempotency key -> cached mutation answer
+	acts         map[string]int    // "<kind>:<id>" -> times performed
+	failFO       map[string]bool   // fulfilment orders whose fulfillment is refused
+	schemaErr    map[string]bool   // operations answered with a schema error
+	codes        map[string]bool
+	tracking     map[string][3]string
+	lose         map[string]int  // operation -> answers still to lose AFTER performing it
+	noCancel     map[string]bool // orders whose orderCancel comes back with a user error
+	cancels      map[string]CancelRecord
+	refunds      map[string][]RefundRecord
+	suggestExtra int64
+	txnCurrency  string
+	cancelPolls  int  // job queries until the next cancel job is done (0: done at once)
+	oddJob       *obj // the next cancel is accepted with this job in the answer (nil job: no job) and not carried out
+	oddJobSet    bool
+	failJob      bool // the next cancel job ends done without cancelling
+	jobs         map[string]*cancelJob
+	pending      map[string]string // order id -> job id of a cancel still running
+	hooks        map[string]func() // operation -> run once, just before the next such mutation
 }
 
 // New returns a seeded shop.
@@ -198,7 +211,9 @@ func New(o Options) *Shop {
 	if o.Currency == "" {
 		o.Currency = "GBP"
 	}
-	s := &Shop{opt: o, levels: map[string]*level{}, idem: map[string]string{}, acts: map[string]int{}, codes: map[string]bool{}, tracking: map[string][3]string{}}
+	s := &Shop{opt: o, levels: map[string]*level{}, idem: map[string]string{}, acts: map[string]int{}, codes: map[string]bool{}, tracking: map[string][3]string{},
+		lose: map[string]int{}, noCancel: map[string]bool{}, cancels: map[string]CancelRecord{}, refunds: map[string][]RefundRecord{},
+		jobs: map[string]*cancelJob{}, pending: map[string]string{}, hooks: map[string]func(){}}
 	for i := 0; i < o.Locations; i++ {
 		s.locations = append(s.locations, gid("Location", 7001+i))
 	}
@@ -253,7 +268,7 @@ func seedOrders(ps []product, o Options) []Order {
 			ID: gid("Order", 5000+n), Name: fmt.Sprintf("#%d", 1000+n), CreatedAt: ts, UpdatedAt: ts,
 			TaxesIncluded: !o.TaxesExcluded, Fin: "PAID", Ful: "UNFULFILLED", Ship: 399, ShipRate: 0.2,
 			Lines: []orderLine{{ID: gid("LineItem", 6000+n), Name: ps[n-1].Title, SKU: v.SKU, VariantID: v.ID, Qty: int64(n), CurQty: int64(n), Unit: unit, Rate: 0.2}},
-			FOs:   []fulfilmentOrder{{ID: gid("FulfillmentOrder", 8000+n), Status: "OPEN", Loc: gid("Location", 1)}},
+			FOs:   []fulfilmentOrder{{ID: gid("FulfillmentOrder", 8000+n), Status: "OPEN", Loc: gid("Location", 7001)}},
 			Customer: Customer{ID: gid("Customer", 9000+n), Country: "GB", Name: "Invented Person", Email: "invented@example.invalid",
 				Phone: "+440000000000", Address: "1 Invented Street"},
 		}
@@ -523,7 +538,7 @@ func (s *Shop) AddOrders(n int) {
 		o := Order{ID: gid("Order", 5000+k), Name: fmt.Sprintf("#%d", 1000+k), CreatedAt: ts, UpdatedAt: ts, TaxesIncluded: !s.opt.TaxesExcluded,
 			Fin: "PAID", Ful: "UNFULFILLED", Ship: 100, ShipRate: 0.2,
 			Lines: []orderLine{{ID: gid("LineItem", 6000+k), Name: "Invented", SKU: v.SKU, VariantID: v.ID, Qty: 1, CurQty: 1, Unit: parseMinor(v.Price), Rate: 0.2}},
-			FOs:   []fulfilmentOrder{{ID: gid("FulfillmentOrder", 8000+k), Status: "OPEN", Loc: gid("Location", 1)}}}
+			FOs:   []fulfilmentOrder{{ID: gid("FulfillmentOrder", 8000+k), Status: "OPEN", Loc: gid("Location", 7001)}}}
 		o.Total = totalOf(o)
 		s.orders = append(s.orders, o)
 	}
@@ -774,11 +789,26 @@ func (s *Shop) graphql(w http.ResponseWriter, r *http.Request) {
 	}
 	isMut := strings.HasPrefix(strings.TrimSpace(req.Query), "mutation")
 	s.mu.Lock()
+	hook := s.hooks[req.OperationName]
+	delete(s.hooks, req.OperationName)
+	s.mu.Unlock()
+	if hook != nil && isMut {
+		hook() // another actor got there first, between the adapter's read and its write
+	}
+	s.mu.Lock()
 	if isMut {
 		s.writes++
 	}
 	data, gerr := s.dispatch(req)
+	lost := isMut && gerr == "" && s.lose[req.OperationName] > 0
+	if lost {
+		s.lose[req.OperationName]--
+	}
 	s.mu.Unlock()
+	if lost { // the effect happened; the answer never arrives
+		writeJSON(w, 502, map[string]string{"errors": "Bad gateway"})
+		return
+	}
 	if gerr != "" {
 		writeJSON(w, 200, map[string]any{"errors": []map[string]any{{"message": gerr, "extensions": map[string]string{"code": gerr}}}, "extensions": costExt(0, 0)})
 		return

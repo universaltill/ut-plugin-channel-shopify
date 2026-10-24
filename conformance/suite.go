@@ -55,6 +55,35 @@ type Target struct {
 	MaxCostHint int
 	// ExpectedProducts is how many products NewShop seeds, for check 2.
 	ExpectedProducts int
+	// WriteBack, when set, lets checks 5 and 6 drive the write-back
+	// operations on the channel's own fake. Without it they skip.
+	WriteBack *WriteBack
+}
+
+// WriteBack is what checks 5 and 6 need from an adapter's fake channel. Every
+// func gets the fresh Shop of the check and may type-assert it to the fake.
+type WriteBack struct {
+	Stock  *StockRig
+	Orders []OrderRig
+}
+
+// StockRig is one tracked stock level the check sets, with the value the
+// channel starts at.
+type StockRig struct {
+	ExternalID string // the stock.set external id
+	Start      int64  // what the channel holds before the check
+	Get        func(Shop) int64
+	Set        func(Shop, int64) // a change made in the channel's own admin
+}
+
+// OrderRig is one order write-back operation with the hooks to count its
+// effect on the channel and to lose the channel's answer once, after the
+// effect happened.
+type OrderRig struct {
+	Name       string
+	Op         channel.OutboxOp
+	Performed  func(Shop) int
+	LoseAnswer func(Shop)
 }
 
 func (tg Target) isWrite(s Seen) bool {
@@ -106,12 +135,24 @@ func Run(t *testing.T, tg Target) {
 			"Adapter side (contract order record, no personal data) is pinned in src/app TestOrdersAreSubmittedWithoutPersonalData.")
 	})
 	t.Run("5_stock_set_absolute_stale_expect_rereads", func(t *testing.T) {
-		t.Skip("TODO ut-docs#4771 (write-back): needs the cloud outbox to issue stock.set with expect. " +
-			"Adapter side is pinned in src/app TestStockSetIsAbsoluteAndAStaleExpectReReads.")
+		if tg.WriteBack == nil || tg.WriteBack.Stock == nil {
+			t.Skip("TODO: this target has no WriteBack.Stock rig. Adapter side is pinned in src/app TestStockSetIsAbsoluteAndAStaleExpectReReads.")
+		}
+		report(t, Check5StockSetAbsoluteStaleExpectRereads(t, tg))
+	})
+	t.Run("5b_cloud_recompute_after_a_stale_expect", func(t *testing.T) {
+		t.Skip("TODO ut-docs#4771 (write-back, cloud half): the cloud recomputing and re-queueing stock.set after stale_expect is the cloud's outbox, not the adapter's. " +
+			"The adapter side (stale_expect retryable, the channel's value reported, orders pulled) is Check5 above.")
 	})
 	t.Run("6_fulfilment_cancel_refund_exactly_once", func(t *testing.T) {
-		t.Skip("TODO ut-docs#4771 (write-back): exactly-once under the host's retry needs the host's outbox attempts. " +
-			"Adapter side (Idempotency-Key, already-done is success) is pinned in src/app TestFulfilmentReachesShopifyOnceAndAlreadyFulfilledIsSuccess; cancel and refund.create are ut-docs#4774 for Shopify.")
+		if tg.WriteBack == nil || len(tg.WriteBack.Orders) == 0 {
+			t.Skip("TODO: this target has no WriteBack.Orders rig. Adapter side is pinned in src/app TestFulfilmentReachesShopifyOnceAndAlreadyFulfilledIsSuccess and writeback_test.go.")
+		}
+		report(t, Check6WriteBackExactlyOnce(t, tg))
+	})
+	t.Run("6b_host_attempt_counting_and_dead_letter", func(t *testing.T) {
+		t.Skip("TODO ut-docs#4771 (write-back, cloud half): six retryable failures dead-lettering, the unchanged re-offer, and the confirmation of a cancel or refund are the host's outbox and the cloud's store " +
+			"(ut-cloud internal/channelsync/writeback_test.go). The adapter side - a lost answer is retryable and the redelivery finds the effect done - is Check6 above.")
 	})
 	t.Run("7_no_outbox_operation_deletes", func(t *testing.T) { report(t, Check7NoOperationDeletes(t, tg)) })
 	t.Run("8_order_edit_with_restock_moves_stock_exactly", func(t *testing.T) {
@@ -295,7 +336,7 @@ func drive(em *Emulator) {
 	em.Ask(channel.AskFetch, channel.FetchInput{Event: channel.EventOrderChanged, ResourceIDs: hostileIDs})
 	em.Ask(channel.AskContact, channel.ContactInput{OrderExternalID: "../../admin"})
 	for i, id := range hostileIDs {
-		for _, k := range []string{channel.OpStockSet, channel.OpFulfilmentCreate, channel.OpOrderCancel} {
+		for _, k := range []string{channel.OpStockSet, channel.OpFulfilmentCreate, channel.OpOrderCancel, channel.OpRefundCreate} {
 			em.Host.Outbox = append(em.Host.Outbox, channel.OutboxOp{
 				ID: fmt.Sprintf("h-%s-%d", k, i), Kind: k, ExternalID: id,
 				Payload: json.RawMessage(fmt.Sprintf(`{"external_order_id":%q,"available":1,"carrier":"c","reason":"other"}`, id)),
@@ -433,6 +474,95 @@ func Check9HostileChannelAndLimits(t TB, tg Target) []string {
 		}
 		if len(em.Host.Submitted) != 0 {
 			v.addf("records were submitted from an answer the host refused")
+		}
+	}
+	return v
+}
+
+// Check5StockSetAbsoluteStaleExpectRereads: stock.set is an absolute value
+// (repeating it changes nothing more), and a compare-and-set whose expect is
+// stale writes nothing, answers a retryable stale_expect and reports the
+// channel's current value.
+func Check5StockSetAbsoluteStaleExpectRereads(t TB, tg Target) []string {
+	t.Helper()
+	var v violations
+	rig := tg.WriteBack.Stock
+	shop, em := tg.rig(t)
+	send := func(id string, expect *int64, available int64) channel.Ack {
+		em.Host.Outbox = append(em.Host.Outbox, channel.OutboxOp{ID: id, Kind: channel.OpStockSet, ExternalID: rig.ExternalID, Expect: expect,
+			Payload: json.RawMessage(fmt.Sprintf(`{"available":%d}`, available))})
+		if r := em.Ask(channel.AskOutbox, struct{}{}); r.Err != nil {
+			v.addf("outbox ask: %v", r.Err)
+		}
+		return em.Host.Acks[id]
+	}
+	if rig.Get(shop) != rig.Start {
+		v.addf("the channel starts at %d, the rig says %d", rig.Get(shop), rig.Start)
+		return v
+	}
+	start := rig.Start
+	if a := send("s-1", &start, 4); a.Error != nil || rig.Get(shop) != 4 {
+		v.addf("stock.set to 4 gave %+v and the channel holds %d", a, rig.Get(shop))
+	}
+	if a := send("s-2", &[]int64{4}[0], 4); a.Error != nil || rig.Get(shop) != 4 {
+		v.addf("repeating the absolute value gave %+v and the channel holds %d, want 4", a, rig.Get(shop))
+	}
+	rig.Set(shop, 2) // sold in the channel meanwhile
+	em.Host.Submitted = nil
+	a := send("s-3", &[]int64{4}[0], 3)
+	if a.Error == nil || a.Error.Code != "stale_expect" || !a.Error.Retryable {
+		v.addf("a stale expect was answered %+v, want a retryable stale_expect", a)
+	}
+	if rig.Get(shop) != 2 {
+		v.addf("a stale compare-and-set changed the channel to %d", rig.Get(shop))
+	}
+	seen := false
+	for _, b := range em.Host.Submitted {
+		seen = seen || (b.Kind == channel.KindStockObserved && len(b.Records) > 0)
+	}
+	if !seen {
+		v.addf("a stale expect reported nothing: the channel's current value must be submitted as stock_observed")
+	}
+	return v
+}
+
+// Check6WriteBackExactlyOnce: for each order write-back (fulfilment, cancel,
+// refund) the channel performs the effect and the answer is lost. The adapter
+// must say so retryably; when the host offers the SAME operation again it must
+// read the channel, find the effect there, acknowledge success and send no
+// write at all. The effect happened exactly once.
+func Check6WriteBackExactlyOnce(t TB, tg Target) []string {
+	t.Helper()
+	var v violations
+	for _, rig := range tg.WriteBack.Orders {
+		shop, em := tg.rig(t)
+		deliver := func() channel.Ack {
+			em.Host.Outbox = append(em.Host.Outbox, rig.Op)
+			if r := em.Ask(channel.AskOutbox, struct{}{}); r.Err != nil {
+				v.addf("%s: outbox ask: %v", rig.Name, r.Err)
+			}
+			return em.Host.Acks[rig.Op.ID]
+		}
+		rig.LoseAnswer(shop)
+		first := deliver()
+		if first.Error == nil || !first.Error.Retryable {
+			v.addf("%s: the answer was lost and the ack is %+v, want a retryable error", rig.Name, first)
+		}
+		if n := rig.Performed(shop); n != 1 {
+			v.addf("%s: the effect happened %d times after the first delivery, want 1", rig.Name, n)
+		}
+		for i := 2; i <= 3; i++ {
+			writes := shop.Writes()
+			a := deliver()
+			if a.Error != nil {
+				v.addf("%s: delivery %d (the effect is already there) gave %+v, want success", rig.Name, i, a)
+			}
+			if shop.Writes() != writes {
+				v.addf("%s: delivery %d sent a write although the effect was already there", rig.Name, i)
+			}
+			if n := rig.Performed(shop); n != 1 {
+				v.addf("%s: the effect happened %d times after delivery %d, want exactly once", rig.Name, n, i)
+			}
 		}
 	}
 	return v

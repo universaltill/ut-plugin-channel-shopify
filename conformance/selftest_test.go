@@ -11,6 +11,7 @@ import (
 	"github.com/universaltill/universal-till/sdk/plugin/channel"
 
 	"github.com/universaltill/ut-plugin-channel-shopify/conformance"
+	"github.com/universaltill/ut-plugin-channel-shopify/internal/fakeshop"
 	"github.com/universaltill/ut-plugin-channel-shopify/src/app"
 )
 
@@ -162,4 +163,58 @@ func TestSuiteCatchesAnAdapterThatLeaksWhatItIsGiven(t *testing.T) {
 		return nil, nil
 	}})
 	wantViolation(t, conformance.Check9HostileChannelAndLimits(t, tg), "credential reached adapter output")
+}
+
+const invMutation = `mutation InventorySet($input: InventorySetQuantitiesInput!, $key: String!) { inventorySetQuantities(input: $input) @idempotent(key: $key) { userErrors { code } } }`
+
+func TestSuiteCatchesAStockSetThatIgnoresExpect(t *testing.T) {
+	probe := fakeshop.New(fakeshop.Options{})
+	loc := probe.Locations()[0]
+	tg := broken(channel.Handlers{channel.AskOutbox: func(channel.Event) (any, error) {
+		ops, _ := channel.OutboxNext(10)
+		for _, op := range ops { // an unconditional write, whatever the channel holds
+			var p struct{ Available int64 }
+			_ = json.Unmarshal(op.Payload, &p)
+			post("InventorySet", invMutation, map[string]any{"input": map[string]any{"name": "available", "reason": "correction", "ignoreCompareQuantity": true,
+				"quantities": []any{map[string]any{"inventoryItemId": "gid://shopify/InventoryItem/3010", "locationId": loc, "quantity": p.Available}}}, "key": op.ID}, 10)
+			_ = channel.OutboxAck(op.ID, channel.Ack{ExternalID: op.ExternalID})
+		}
+		return nil, nil
+	}})
+	got := conformance.Check5StockSetAbsoluteStaleExpectRereads(t, tg)
+	wantViolation(t, got, "a stale expect was answered")
+	wantViolation(t, got, "a stale compare-and-set changed the channel")
+}
+
+func TestSuiteCatchesAWriteBackThatWritesBlindOnARedelivery(t *testing.T) {
+	real := app.Handlers()[channel.AskOutbox]
+	tg := broken(channel.Handlers{channel.AskOutbox: func(ev channel.Event) (any, error) {
+		out, err := real(ev)
+		// Whatever the channel already shows, send the write once more.
+		post("VariantPrices", priceMutation, map[string]any{"productId": "gid://shopify/Product/1001", "variants": []map[string]any{{"id": "gid://shopify/ProductVariant/2010", "price": "1.00"}}}, 10)
+		return out, err
+	}})
+	wantViolation(t, conformance.Check6WriteBackExactlyOnce(t, tg), "sent a write although the effect was already there")
+}
+
+func TestSuiteCatchesAWriteBackThatAcksWithoutDoingIt(t *testing.T) {
+	tg := broken(channel.Handlers{channel.AskOutbox: func(channel.Event) (any, error) {
+		ops, _ := channel.OutboxNext(10)
+		for _, op := range ops { // a liar: success, nothing sent
+			_ = channel.OutboxAck(op.ID, channel.Ack{ExternalID: op.ExternalID})
+		}
+		return nil, nil
+	}})
+	got := conformance.Check6WriteBackExactlyOnce(t, tg)
+	wantViolation(t, got, "want a retryable error")
+	wantViolation(t, got, "the effect happened 0 times")
+}
+
+func TestTheRealAdapterPassesChecks5And6(t *testing.T) {
+	if got := conformance.Check5StockSetAbsoluteStaleExpectRereads(t, shopifyTarget()); len(got) != 0 {
+		t.Fatalf("check 5: %v", got)
+	}
+	if got := conformance.Check6WriteBackExactlyOnce(t, shopifyTarget()); len(got) != 0 {
+		t.Fatalf("check 6: %v", got)
+	}
 }

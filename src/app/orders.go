@@ -47,6 +47,19 @@ type gqlLine struct {
 	TaxLines []gqlTaxLine `json:"taxLines"`
 }
 
+// gqlRefund is one refund of an order and the lines it covers.
+type gqlRefund struct {
+	Items struct {
+		Nodes []struct {
+			Quantity    int64  `json:"quantity"`
+			RestockType string `json:"restockType"`
+			LineItem    struct {
+				ID string `json:"id"`
+			} `json:"lineItem"`
+		} `json:"nodes"`
+	} `json:"refundLineItems"`
+}
+
 type gqlLines struct {
 	PageInfo pageInfoT `json:"pageInfo"`
 	Nodes    []gqlLine `json:"nodes"`
@@ -81,18 +94,8 @@ type gqlOrder struct {
 	ShippingAddress *struct {
 		Country string `json:"countryCodeV2"`
 	} `json:"shippingAddress"`
-	Refunds []struct {
-		Items struct {
-			Nodes []struct {
-				Quantity    int64  `json:"quantity"`
-				RestockType string `json:"restockType"`
-				LineItem    struct {
-					ID string `json:"id"`
-				} `json:"lineItem"`
-			} `json:"nodes"`
-		} `json:"refundLineItems"`
-	} `json:"refunds"`
-	Lines gqlLines `json:"lineItems"`
+	Refunds []gqlRefund `json:"refunds"`
+	Lines   gqlLines    `json:"lineItems"`
 }
 
 // orderRecord is the contract's `order` record (sales-channel-v1.md section
@@ -221,7 +224,7 @@ func mapOrder(o *gqlOrder) (orderRecord, string) {
 	for _, rf := range o.Refunds {
 		for _, n := range rf.Items.Nodes {
 			refunded[n.LineItem.ID] += n.Quantity
-			if n.RestockType != "" && n.RestockType != "NO_RESTOCK" {
+			if n.RestockType != "" && n.RestockType != restockNone {
 				restocked[n.LineItem.ID] += n.Quantity
 			}
 		}

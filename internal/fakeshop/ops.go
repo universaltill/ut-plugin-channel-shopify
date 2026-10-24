@@ -167,6 +167,16 @@ func (s *Shop) dispatch(req gqlRequest) (any, string) {
 		return obj{"order": nil}, ""
 	case "FulfillmentCreate":
 		return s.opFulfil(req), ""
+	case "RefundState":
+		return s.opRefundState(req)
+	case "SuggestedRefund":
+		return s.opSuggestedRefund(req)
+	case "RefundCreate":
+		return s.opRefundCreate(req)
+	case "OrderCancel":
+		return s.opOrderCancel(req)
+	case "CancelJob":
+		return s.opCancelJob(req)
 	}
 	return nil, "UNKNOWN_OPERATION"
 }
@@ -541,7 +551,7 @@ func (s *Shop) AddFulfilmentOrder(orderID string, location int) string {
 	id := ""
 	s.MutateOrder(orderID, func(o *Order) {
 		id = gid("FulfillmentOrder", 8500+len(o.FOs)+location*10)
-		o.FOs = append(o.FOs, fulfilmentOrder{ID: id, Status: "OPEN", Loc: gid("Location", location)})
+		o.FOs = append(o.FOs, fulfilmentOrder{ID: id, Status: "OPEN", Loc: gid("Location", 7000+location)})
 	})
 	return id
 }

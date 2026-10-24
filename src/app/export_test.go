@@ -6,7 +6,8 @@ package app
 func AllQueries() []string {
 	var out []string
 	for _, q := range []queryDef{qConnectTest, qProducts, qMoreVariants, qShopCurrency, qLocations, qLevels, qOrders, qOrder, qOrderLines, qContact,
-		qStockTarget, qInventorySet, qInventoryActivate, qVariantPrices, qFulfilmentOrders, qFulfillmentCreate} {
+		qStockTarget, qInventorySet, qInventoryActivate, qVariantPrices, qFulfilmentOrders, qFulfillmentCreate,
+		qOrderCancel, qCancelJob, qRefundState, qSuggestedRefund, qRefundCreate} {
 		out = append(out, q.Text)
 	}
 	return out
@@ -56,8 +57,16 @@ const (
 	FCompareField    = fCompareField
 	FCompareOff      = fCompareOff
 	DIdempotent      = dIdempotent
+	MOrderCancel     = mOrderCancel
+	MCancelJob       = mCancelJob
+	MRefundCreate    = mRefundCreate
+	FSuggestedRefund = fSuggestedRefund
+	FOrderRefunds    = fOrderRefunds
 )
 
 func CursorOK(s string) bool  { return cursorRe.MatchString(s) }
 func AccountOK(s string) bool { return accountRe.MatchString(s) }
 func AccountPattern() string  { return accountRe.String() }
+
+// SpentHTTP is the requests the latest ask counted against its budget.
+func SpentHTTP() int { return spent.http }

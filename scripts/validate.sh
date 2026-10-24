@@ -54,6 +54,9 @@ cap = c.get("capabilities") or {}
 # (ut-docs#4774). Declaring items push/both would make the cloud queue listing.upsert for every new item and dead-letter it.
 if cap.get("items") not in ("pull", None): errs.append("capabilities.items must be 'pull' until item creation lands (ut-docs#4774)")
 if cap.get("variants") not in ("pull", "both"): errs.append("capabilities.variants is 'pull' or 'both' (price push to existing variants only)")
+# The adapter does order.cancel and refund.create (ut-docs#4774): without push the cloud never queues them.
+for k in ("fulfilment", "cancel", "refunds"):
+    if cap.get(k) != "push": errs.append(f"capabilities.{k} must be 'push': the adapter implements it")
 if f'AccountSuffix = "{suffix}"' not in src: errs.append("src/app/api.go AccountSuffix must equal channel.account_suffix")
 
 a = c.get("auth") or {}

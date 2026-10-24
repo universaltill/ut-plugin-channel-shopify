@@ -3,8 +3,8 @@
 The **Shopify sales channel** for Universal Till (`com.universaltill.channel-shopify`).
 It connects a Shopify store to Universal Till: it imports the store's products
 and variants, sends price changes and stock to the store, brings its orders in
-and reports shipments with tracking back to Shopify. Nothing in the store is
-ever deleted.
+and reports shipments with tracking, cancels and refunds back to Shopify.
+Nothing in the store is ever deleted.
 
 It is a signed **WASM plugin of type `channel`** that runs only in the ut-cloud
 channel host, never on a till (ADR-0169, contract
@@ -28,7 +28,7 @@ development store and the app credentials the owner has to create (card
 | `channel.import.ask` | Pages through products with variants (Admin GraphQL, cursor paging), then through every location's inventory levels. Submits `listing` and `stock_observed` records. Resumable through cursors; records are deterministic (`external_version` is Shopify's `updatedAt`) so a second import is byte-identical and the host reports zero changes. |
 | `channel.fetch.ask` / `channel.tick` | Re-fetch named orders / sweep orders updated since the `orders.since` cursor and submit contract `order` records with **no customer name, address, email or phone**. |
 | `channel.contact.ask` | Fetches an order's contact details live for display; never stored, submitted or logged. |
-| `channel.outbox.ask` | `stock.set` (absolute, compare-and-set on `expect`, inactive levels activated, a stale `expect` reports the shop's value and pulls recent orders), `fulfilment.create` (shipped with carrier and tracking), `listing.upsert` (variant prices only). Anything else is dead-lettered with `unsupported_op` and a logged `outbox.unsupported_op`: a delete, a cancel, a refund, and `listing.unpublish` (a product draft is an item push, and `items` is `pull`: card ut-docs#4774 adds it with the right declaration). Nothing is ever deleted. |
+| `channel.outbox.ask` | `stock.set` (absolute, compare-and-set on `expect`, inactive levels activated, a stale `expect` reports the shop's value and pulls recent orders), `fulfilment.create` (shipped with carrier and tracking), `order.cancel` and `refund.create` (below), `listing.upsert` (variant prices only). Anything else is dead-lettered with `unsupported_op` and a logged `outbox.unsupported_op`: a delete, and `listing.unpublish` (a product draft is an item push, and `items` is `pull`: card ut-docs#4774 adds it with the right declaration). Nothing is ever deleted. |
 
 The plugin has **no account name, no credential and no network of its own**.
 Its only network path is `channel_http` to one URL,
@@ -80,7 +80,7 @@ connection's verified account and adds the access token.
   `voided`.
 - **Capabilities** are declared honestly: `items: pull`, `variants: both`
   (price pushed to an existing variant), `stock: both`, `orders: pull`,
-  `fulfilment: push`. The adapter cannot create or edit an item (ut-docs#4774),
+  `fulfilment: push`, `cancel: push`, `refunds: push`. The adapter cannot create or edit an item (ut-docs#4774),
   so it does not declare `items` push; the cloud would otherwise queue
   `listing.upsert` for every new item and dead-letter it. For the same reason
   it does not act on `listing.unpublish` (an undeclared capability is never
@@ -118,8 +118,42 @@ connection's verified account and adds the access token.
   sends only what is still open. An order Shopify already shows as fulfilled
   (by us earlier, or by the shop in its own admin) is success. The customer is
   not notified by this call (a setting is future work).
+- **Cancel** (`order.cancel`) reads the order first. An already-cancelled order
+  (by us earlier or by the shop) is success; one whose fulfilment has begun
+  (`FULFILLED`, `PARTIALLY_FULFILLED`, `IN_PROGRESS`) is refused for good as
+  `order_fulfilled`, with no mutation sent. The contract's reason maps to
+  Shopify's (`customer_request` CUSTOMER, `out_of_stock` INVENTORY, `fraud`
+  FRAUD, `other` OTHER); `restock` is the op's flag; the buyer is **not**
+  notified; the money is refunded (`refund: true`, which is what the cloud's
+  confirmation assumes: every unit refunded); the staff note is a constant.
+  Shopify runs a cancel as a job, so success is acknowledged only when the order
+  **shows cancelled**: a job not done in the answer is polled once (`job(id:)`);
+  still running is a retryable `cancel_pending` (the retry reads first and finds
+  it cancelled), a job that ended with the order not cancelled is
+  `cancel_failed` (non-retryable), and a user error saying a cancel is already
+  in progress is `cancel_pending` too, never a dead letter. No
+  `Idempotency-Key` is sent: a re-sent cancel would be a user error hiding the
+  first one's success; a lost answer is retryable and the retry finds the order
+  cancelled or pending.
+- **Refund** (`refund.create`) is by quantity. It reads the order first (its
+  currency, cancellation, fulfilment, location and what each line already shows
+  refunded): if every named line is at least at its `refunded_to` it is success
+  (our earlier attempt, or the shop's own refund); otherwise it refunds only
+  the delta still owed (never more than the line's `quantity`), then asks
+  Shopify what those units come to (`suggestedRefund`) and **refuses, before
+  sending anything, an amount above `max_amount_minor`** (`refund_exceeds_ceiling`,
+  non-retryable). A currency other than the shop's is `currency_mismatch`. A
+  line is restocked only when every owed unit of it is to go back: an
+  unfulfilled order restocks as `CANCEL`, a fulfilled one as `RETURN` to the
+  one location it shipped from (`location_required` if there are several, never
+  a guess), a part-fulfilled one is refused `restock_not_supported`. The op id
+  is sent as Shopify's own `@idempotent` key and as the host's
+  `Idempotency-Key`; exactly-once across attempts rests on the read. Extra
+  payload fields (`unit_price_minor`, `discount_line_minor`, a reported-refund
+  baseline) are tolerated, not required; Shopify works the money out. No
+  customer data is read, sent or logged; the note is a constant.
 - **Out of scope here** (ut-docs#4774): collections and categories, compare-at
-  price, images, customers, refunds, cancels, product creation, `productSet`.
+  price, images, customers, product creation, `productSet`.
 
 ## Verify first on the dev store
 
@@ -131,6 +165,11 @@ and a test keeps them there. First run on the development store, in this order:
 > **Do not queue real stock ops on a shop until the first two rows pass:** a
 > schema error there dead-letters every `stock.set` non-retryably (log code
 > `outbox.graphql_error`).
+>
+> **Do not queue `order.cancel` or `refund.create` on a real shop until the
+> `orderCancel`, `job`, `suggestedRefund` and `refundCreate` (+ `@idempotent`)
+> rows pass on a dev-store order:** they move customer money, and every name in
+> them is from memory.
 
 | Name / assumption | Where | What failing looks like |
 |---|---|---|
@@ -148,6 +187,16 @@ and a test keeps them there. First run on the development store, in this order:
 | `refunds(first: 6)` / `refundLineItems(first: 21)`, `locations(first: 21)` cost and shape | `queries.go` | Throttling, or `order.refused.too_many_refunds` for ordinary orders. |
 | Order query cost and page size | `orderPage`, `maxOrderPages` (`budget.go`), `Cost:` in `queries.go` | Read `extensions.cost.actualQueryCost` of one `Orders` query, then raise `orderPage`/`maxOrderPages` and lower the cost hint. Until then a first sweep of a big shop is slow (4 orders per tick). |
 | `assignedLocation { location { id } }` on a fulfilment order | `fFOLocation` | A GraphQL error on every `fulfil` (non-retryable), or one fulfillment per order not per location (userErrors on multi-location orders). |
+| `orderCancel(orderId, reason, restock, refund, notifyCustomer, staffNote)`, its `job { id done }`, `orderCancelUserErrors` / `userErrors`, and the reasons `CUSTOMER` `INVENTORY` `FRAUD` `OTHER` | `mOrderCancel`, `reason*` | A GraphQL schema error on every `order.cancel` (ops dead-letter as `rejected_by_channel`, log `outbox.graphql_error`); or Shopify requires `@idempotent` on it (then add `dIdempotent` and a `key` variable). |
+| `job(id:) { id done }` answers the cancel job's state; a job has no error field, so a failed job (for example the gateway refund) shows as done with the order NOT cancelled | `rJob`, `mCancelJob`, `confirmCancel` | `cancel_pending` on an order that cancels fine, until the cloud dead-letters the op with that code after about 31 minutes (six retryable failures; staff then Retry or Mark as done) (the job query errors: log `outbox.graphql_error`), or `cancel_failed` for an order that IS cancelled a moment later (cancelledAt lags the job). Cancel an order with a real payment on the dev store and one whose gateway refund fails. |
+| orderCancel's user error while a cancel of the same order runs contains `in progress` | `cancelInProgressText` | A retry while the job runs dead-letters as `rejected_by_channel`; read the real message and correct the text. |
+| `refund: true` on a cancel refunds the whole payment | `vRefund` | A cancelled order that shows no refund in Shopify, while Universal Till shows it refunded. |
+| `Order.suggestedRefund(refundLineItems:)` with `amountSet` and `suggestedTransactions { gateway parentTransaction { id } amountSet { shopMoney presentmentMoney } }`; shipping is not refunded by default | `fSuggestedRefund` | Every `refund.create` dead-letters as `rejected_by_channel` (schema error), or a refund is refused `refund_exceeds_ceiling` because the suggestion includes shipping. |
+| `refundCreate(input: RefundInput!)` with `orderId`, `note`, `notify`, `refundLineItems { lineItemId quantity restockType locationId }`, `transactions { orderId parentId kind gateway amount }`, plus `@idempotent(key:)`; `userErrors { field }` | `mRefundCreate`, `k*` | Every `refund.create` fails `rejected_by_channel` with a userError, or a schema error. Then correct the names; check `transactions.amount` is in the presentment currency. |
+| `restockType` `RETURN` needs the `locationId`; `CANCEL` is for unfulfilled lines; `NO_RESTOCK` | `restock*` | A refund with restock refused by Shopify (userErrors) on a fulfilled or an unfulfilled order. |
+| Lines of a `PARTIALLY_FULFILLED` order cannot be restocked by this adapter | `refundItems` | Staff must refund without restock, or mark the operation done after doing it in the admin. |
+| A refund the cloud queued while the shop had refunded some units itself is refunded for the difference only. **Accepted race:** read, then `suggestedRefund`, then `refundCreate` are separate round trips with no compare-and-set; Shopify caps a refund at the refundable maximum, so the worst case is bounded | `owed` | Over-refund: one more unit refunded than staff intended when staff refund the same line in the admin within the same few seconds. Compare the refund in Shopify with `refunded_to` in the op. |
+| The cloud's ceiling (floor of the discount share, ceiling of the tax) and Shopify's proportional refund agree to the minor unit | `refundTransactions` | A spurious `refund_exceeds_ceiling` dead letter (fail closed, no money moves) on an odd-priced 3-unit line with a discount code. Try exactly that on the dev store; if it happens the cloud ceiling needs a one-unit allowance per line. |
 | The requested costs (`Cost:` per query) | `queries.go` | Shopify's `extensions.cost.requestedQueryCost` is above the hand count: raise the hint. |
 
 ## Layout
