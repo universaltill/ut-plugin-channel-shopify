@@ -24,8 +24,9 @@ hand-rolled `//go:wasmimport` lines. It runs only in the ut-cloud channel host
   both (`security_test.go`).
 - **No customer name, address, email or phone** in a submitted `order`, a
   cursor, a log field or an ack. Order queries do not select them; `qContact`
-  is the one place that does, for the `contact` answer only. The customer is
-  decoded for id and shipping country only.
+  is the one place that does, for the `contact` answer only. The `customer`
+  object is not selected at all: it needs `read_customers`, which the app does
+  not hold (ut-docs#4920).
 - **Nothing is ever deleted.** No delete/destroy/remove operation text; the
   mutation allow-list in `security_test.go` is exact (`OrderCancel` and
   `RefundCreate` are the only ones that may name cancel/refund, and only they).

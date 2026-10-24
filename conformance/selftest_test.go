@@ -175,8 +175,8 @@ func TestSuiteCatchesAStockSetThatIgnoresExpect(t *testing.T) {
 		for _, op := range ops { // an unconditional write, whatever the channel holds
 			var p struct{ Available int64 }
 			_ = json.Unmarshal(op.Payload, &p)
-			post("InventorySet", invMutation, map[string]any{"input": map[string]any{"name": "available", "reason": "correction", "ignoreCompareQuantity": true,
-				"quantities": []any{map[string]any{"inventoryItemId": "gid://shopify/InventoryItem/3010", "locationId": loc, "quantity": p.Available}}}, "key": op.ID}, 10)
+			post("InventorySet", invMutation, map[string]any{"input": map[string]any{"name": "available", "reason": "correction",
+				"quantities": []any{map[string]any{"inventoryItemId": "gid://shopify/InventoryItem/3010", "locationId": loc, "quantity": p.Available, "changeFromQuantity": nil}}}, "key": op.ID}, 10)
 			_ = channel.OutboxAck(op.ID, channel.Ack{ExternalID: op.ExternalID})
 		}
 		return nil, nil

@@ -106,7 +106,7 @@ func TestOrdersAreSubmittedWithoutPersonalData(t *testing.T) {
 				if r.Op == "Contact" {
 					t.Error("a tick asked for contact details")
 				}
-				for _, f := range []string{"email", "phone", "firstName", "lastName", "address1", "displayName", "zip"} {
+				for _, f := range []string{"email", "phone", "firstName", "lastName", "address1", "displayName", "zip", "customer"} { // customer needs read_customers, which the app does not hold (ut-docs#4920)
 					if strings.Contains(r.Query, f) {
 						t.Errorf("operation %s selects %q", r.Op, f)
 					}
@@ -116,7 +116,7 @@ func TestOrdersAreSubmittedWithoutPersonalData(t *testing.T) {
 				if o.TotalMinor != o.formula() {
 					t.Errorf("%s: total %d, contract formula says %d", o.OrderNumber, o.TotalMinor, o.formula())
 				}
-				if o.Customer == nil || o.Customer.Country != "GB" || !strings.HasPrefix(o.Customer.ExternalID, "gid://shopify/Customer/") {
+				if o.Customer != nil { // no customer object is selected, so no customer ref is submitted (ut-docs#4920)
 					t.Errorf("%s: customer %+v", o.OrderNumber, o.Customer)
 				}
 				if o.Currency != "GBP" || o.Status != "new" || o.PaymentState != "paid" || o.ExternalVersion == "" || o.PlacedAt == "" || o.ShippingTaxBP != 2000 || o.ShippingTaxIncluded == excl {

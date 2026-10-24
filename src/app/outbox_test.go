@@ -5,6 +5,7 @@ package app_test
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/universaltill/universal-till/sdk/plugin/channel"
@@ -137,6 +138,52 @@ func TestStockSetLocations(t *testing.T) {
 	// A location that is not the shop's is refused.
 	if a := e.outbox(stockOp("op-5", v+"@gid://shopify/Location/424242", nil, `{"available": 1}`))["op-5"]; a.Error == nil || a.Error.Retryable {
 		t.Fatalf("%+v", a)
+	}
+}
+
+// An op that activates a level and then sets it sends two different mutations:
+// each carries its own key, so a redelivery that no longer needs the activation
+// (the level is held now) is judged on the set alone (ut-docs#4920).
+func TestStockSetActivationAndSetCarryTheirOwnKeys(t *testing.T) {
+	e := newEnv(t, fakeshop.Options{Locations: 2})
+	v := e.shop.VariantIDs(1)[0]
+	l2 := e.shop.Locations()[1]
+	e.shop.DeactivateLevel(v, l2)
+	if a := e.outbox(stockOp("op-1", v+"@"+l2, nil, `{"available": 7}`))["op-1"]; a.Error != nil || e.shop.Stock(v, l2) != 7 {
+		t.Fatalf("%+v", a)
+	}
+	keys := map[string]string{}
+	for _, r := range e.shop.Requests() {
+		if r.Op == "InventoryActivate" || r.Op == "InventorySet" {
+			var k string
+			_ = json.Unmarshal(r.Variables["key"], &k)
+			keys[r.Op] = k
+			if r.Header.Get("Idempotency-Key") != k {
+				t.Errorf("%s: header %q, key %q", r.Op, r.Header.Get("Idempotency-Key"), k)
+			}
+		}
+	}
+	if keys["InventoryActivate"] == "" || keys["InventorySet"] == "" || keys["InventoryActivate"] == keys["InventorySet"] || !strings.HasPrefix(keys["InventorySet"], "op-1") {
+		t.Fatalf("keys %v: want two different keys derived from the op id", keys)
+	}
+}
+
+// The first delivery activated the level and set it with no compare; the ack
+// was lost. The redelivery finds the level held, so it compares against the
+// cloud's last value: a different input under the same op id. It must be judged
+// on the stale compare (a retryable stale_expect), never refused for its key.
+func TestStockSetRedeliveryAfterActivationIsJudgedOnItsCompareNotItsKey(t *testing.T) {
+	e := newEnv(t, fakeshop.Options{Locations: 2})
+	v := e.shop.VariantIDs(1)[0]
+	l2 := e.shop.Locations()[1]
+	e.shop.DeactivateLevel(v, l2)
+	if a := e.outbox(stockOp("op-1", v+"@"+l2, nil, `{"available": 7}`))["op-1"]; a.Error != nil {
+		t.Fatalf("first delivery: %+v", a)
+	}
+	expect := int64(0) // what the cloud last saw before the first delivery
+	a := e.outbox(stockOp("op-1", v+"@"+l2, &expect, `{"available": 7}`))["op-1"]
+	if a.Error == nil || a.Error.Code != "stale_expect" || !a.Error.Retryable {
+		t.Fatalf("redelivery: %+v, want a retryable stale_expect", a)
 	}
 }
 

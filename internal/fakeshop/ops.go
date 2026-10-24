@@ -421,10 +421,9 @@ func (s *Shop) opInventorySet(req gqlRequest) obj {
 		return obj{"inventorySetQuantities": obj{"userErrors": []obj{{"code": code}}}}
 	}
 	var in struct {
-		Name                  string
-		Reason                string
-		IgnoreCompareQuantity bool `json:"ignoreCompareQuantity"`
-		Quantities            []struct {
+		Name       string
+		Reason     string
+		Quantities []struct {
 			InventoryItemID    string `json:"inventoryItemId"`
 			LocationID         string `json:"locationId"`
 			Quantity           int64  `json:"quantity"`
@@ -447,7 +446,7 @@ func (s *Shop) opInventorySet(req gqlRequest) obj {
 				return fail("ITEM_NOT_STOCKED_AT_LOCATION")
 			case !v.Tracked:
 				return fail("ITEM_NOT_TRACKED")
-			case !in.IgnoreCompareQuantity && (q.ChangeFromQuantity == nil || *q.ChangeFromQuantity != lv.Qty):
+			case q.ChangeFromQuantity != nil && *q.ChangeFromQuantity != lv.Qty:
 				return fail("CHANGE_FROM_QUANTITY_STALE")
 			}
 			lv.Qty, lv.UpdatedAt = q.Quantity, s.bump()

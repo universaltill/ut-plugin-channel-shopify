@@ -226,7 +226,8 @@ func stockSet(op channel.OutboxOp) channel.Ack {
 				Errors []json.RawMessage `json:"userErrors"`
 			} `json:"inventoryActivate"`
 		}
-		if err := run(qInventoryActivate, map[string]any{"item": t.Node.Item.ID, "loc": loc}, "", &a); err != nil {
+		// Its own key: a different mutation from the set below (ut-docs#4920).
+		if err := run(qInventoryActivate, map[string]any{"item": t.Node.Item.ID, "loc": loc, "key": op.ID + keyActivate}, op.ID+keyActivate, &a); err != nil {
 			return failFor(err)
 		}
 		if len(a.Activate.Errors) > 0 {
@@ -235,21 +236,33 @@ func stockSet(op channel.OutboxOp) channel.Ack {
 	}
 	line := map[string]any{"inventoryItemId": t.Node.Item.ID, kLocationID: loc, "quantity": *p.Available}
 	input := map[string]any{"name": "available", "reason": "correction", "quantities": []any{line}}
+	// Shopify 2026-10 requires changeFromQuantity on every quantity: the value
+	// the cloud last saw is a compare-and-set, an explicit null is "no compare"
+	// (there is no ignoreCompareQuantity field, ut-docs#4920).
+	line[fCompareField] = nil
 	if op.Expect != nil && held {
-		line[fCompareField] = *op.Expect // compare-and-set on the last value the cloud saw
-	} else {
-		input[fCompareOff] = true
+		line[fCompareField] = *op.Expect
 	}
 	var r struct {
-		Set struct {
+		Set *struct {
 			Errors []userError `json:"userErrors"`
 		} `json:"inventorySetQuantities"`
 	}
 	// The operation id is the idempotency key: as Shopify's own idempotency
 	// directive variable, and as a header that Shopify does NOT read: the header is only
 	// the host's signal that this POST is safe to re-send after a lost answer.
-	if err := run(qInventorySet, map[string]any{"input": input, "key": op.ID}, op.ID, &r); err != nil {
+	// Shopify refuses one key reused with different input, and a redelivery
+	// after an activation compares where the first delivery did not: a set of a
+	// level that was not held has its own key.
+	key := op.ID
+	if !held {
+		key += keyNew
+	}
+	if err := run(qInventorySet, map[string]any{"input": input, "key": key}, key, &r); err != nil {
 		return failFor(err)
+	}
+	if r.Set == nil { // no answer for this mutation: nothing was written, so never ack it
+		return fail("bad_answer", true)
 	}
 	switch code := userErrCode(r.Set.Errors); {
 	case code == "":
