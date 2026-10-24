@@ -2,7 +2,6 @@ package app
 
 import (
 	"errors"
-	"regexp"
 
 	"github.com/universaltill/universal-till/sdk/plugin/channel"
 )
@@ -68,7 +67,7 @@ type gqlLines struct {
 // gqlOrder decodes ONLY what an order record needs. The buyer's name, email,
 // phone and street address are neither selected in the query nor decoded
 // here, so they cannot reach a submitted record, a cursor or a log line. The
-// customer is read for its id and the shipping country only.
+// customer object is not selected at all (read_customers, ut-docs#4920).
 type gqlOrder struct {
 	ID            string   `json:"id"`
 	Name          string   `json:"name"`
@@ -88,12 +87,6 @@ type gqlOrder struct {
 			TaxLines []gqlTaxLine `json:"taxLines"`
 		} `json:"nodes"`
 	} `json:"shippingLines"`
-	Customer *struct {
-		ID string `json:"id"`
-	} `json:"customer"`
-	ShippingAddress *struct {
-		Country string `json:"countryCodeV2"`
-	} `json:"shippingAddress"`
 	Refunds []gqlRefund `json:"refunds"`
 	Lines   gqlLines    `json:"lineItems"`
 }
@@ -103,20 +96,19 @@ type gqlOrder struct {
 // tax_included, refund fields, ...), so the adapter owns this type.
 type orderRecord struct {
 	channel.Identity
-	OrderNumber         string               `json:"order_number"`
-	PlacedAt            string               `json:"placed_at"`
-	Currency            string               `json:"currency"`
-	Status              string               `json:"status"`
-	PaymentState        string               `json:"payment_state,omitempty"`
-	Lines               []orderLineRecord    `json:"lines"`
-	ShippingMinor       int64                `json:"shipping_minor"`
-	ShippingTaxBP       int64                `json:"shipping_tax_bp"`
-	ShippingTaxIncluded bool                 `json:"shipping_tax_included"`
-	OrderDiscountMinor  int64                `json:"order_discount_minor"`
-	TaxAddedMinor       int64                `json:"tax_added_minor"`
-	RefundTotalMinor    int64                `json:"refund_total_minor"`
-	TotalMinor          int64                `json:"total_minor"`
-	Customer            *channel.CustomerRef `json:"customer,omitempty"`
+	OrderNumber         string            `json:"order_number"`
+	PlacedAt            string            `json:"placed_at"`
+	Currency            string            `json:"currency"`
+	Status              string            `json:"status"`
+	PaymentState        string            `json:"payment_state,omitempty"`
+	Lines               []orderLineRecord `json:"lines"`
+	ShippingMinor       int64             `json:"shipping_minor"`
+	ShippingTaxBP       int64             `json:"shipping_tax_bp"`
+	ShippingTaxIncluded bool              `json:"shipping_tax_included"`
+	OrderDiscountMinor  int64             `json:"order_discount_minor"`
+	TaxAddedMinor       int64             `json:"tax_added_minor"`
+	RefundTotalMinor    int64             `json:"refund_total_minor"`
+	TotalMinor          int64             `json:"total_minor"`
 }
 
 type orderLineRecord struct {
@@ -132,8 +124,6 @@ type orderLineRecord struct {
 	RefundedQuantity  int64  `json:"refunded_quantity"`
 	RestockedQuantity int64  `json:"restocked_quantity"`
 }
-
-var countryRe = regexp.MustCompile(`^[A-Z]{2}$`)
 
 // completeLines follows an order's line pages. An order whose lines do not
 // fit in the page budget is refused, never truncated.
@@ -300,13 +290,6 @@ func mapOrder(o *gqlOrder) (orderRecord, string) {
 		return orderRecord{}, "total_mismatch"
 	}
 	r.Status = orderStatus(o, total, refundTotal)
-	if o.Customer != nil && okGID(tCustomer, o.Customer.ID) {
-		c := &channel.CustomerRef{ExternalID: o.Customer.ID}
-		if a := o.ShippingAddress; a != nil && countryRe.MatchString(a.Country) {
-			c.Country = a.Country
-		}
-		r.Customer = c
-	}
 	return r, ""
 }
 

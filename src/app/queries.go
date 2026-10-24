@@ -28,14 +28,16 @@ const (
 	// all the shipping lines of an order (not just the first).
 	fOrderTax      = `totalTaxSet { shopMoney { amount currencyCode } }`
 	fShippingLines = `shippingLines(first: ` + shippingLinesAsked + `) { nodes { discountedPriceSet { shopMoney { amount currencyCode } } taxLines { rate priceSet { shopMoney { amount currencyCode } } } } }`
-	// The compare-and-set field of inventorySetQuantities, and the flag that
-	// turns the compare off.
+	// The compare-and-set field of inventorySetQuantities: required on every
+	// quantity; null turns the compare off.
 	fCompareField = "changeFromQuantity"
-	fCompareOff   = "ignoreCompareQuantity"
 	// Shopify's own idempotency directive for inventorySetQuantities. The
 	// Idempotency-Key HTTP header is NOT a Shopify feature: it is only a signal
 	// to the host that the POST is safe to re-send.
 	dIdempotent = `@idempotent(key: $key)`
+	// Suffixes that give the two mutations of one stock.set op their own
+	// idempotency keys (an op id is at most 128 characters; Shopify allows more).
+	keyActivate, keyNew = ":activate", ":new"
 	// The location a fulfilment order is assigned to. Shopify refuses a
 	// fulfillment whose fulfilment orders sit at different locations, so the
 	// adapter sends one fulfillmentCreate per location.
@@ -129,7 +131,6 @@ const orderFields = `id name createdAt updatedAt cancelledAt currencyCode taxesI
 	`totalPriceSet { shopMoney { amount currencyCode } } ` +
 	`totalRefundedSet { shopMoney { amount currencyCode } } ` +
 	fOrderTax + ` ` + fShippingLines + ` ` +
-	`customer { id } shippingAddress { countryCodeV2 } ` +
 	fOrderRefunds + ` ` +
 	`lineItems(first: $lfirst) { ` + pageInfo + ` nodes { ` + lineFields + ` } }`
 
@@ -164,7 +165,7 @@ var (
 	// qContact is the ONLY operation that selects customer contact details.
 	// Its answer goes to the person who opened the order and nowhere else.
 	qContact = queryDef{Name: "Contact", Cost: 20, Text: `query Contact($id: ID!) { order(id: $id) { email phone ` +
-		`customer { displayName } shippingAddress { name address1 address2 city province zip country } } }`}
+		`shippingAddress { name address1 address2 city province zip country } } }`}
 
 	qStockTarget = queryDef{Name: "StockTarget", Cost: 60, Text: `query StockTarget($id: ID!) { node(id: $id) { ... on ProductVariant { ` +
 		`inventoryItem { id tracked inventoryLevels(first: 10) { nodes { location { id } quantities(names: ["available"]) { quantity } } } } } } ` +
@@ -173,8 +174,8 @@ var (
 	qInventorySet = queryDef{Name: "InventorySet", Cost: 10, Mutation: true, Text: `mutation InventorySet($input: InventorySetQuantitiesInput!, $key: String!) { ` +
 		`inventorySetQuantities(input: $input) ` + dIdempotent + ` { userErrors { code } } }`}
 
-	qInventoryActivate = queryDef{Name: "InventoryActivate", Cost: 10, Mutation: true, Text: `mutation InventoryActivate($item: ID!, $loc: ID!) { ` +
-		`inventoryActivate(inventoryItemId: $item, locationId: $loc) { userErrors { field } } }`}
+	qInventoryActivate = queryDef{Name: "InventoryActivate", Cost: 10, Mutation: true, Text: `mutation InventoryActivate($item: ID!, $loc: ID!, $key: String!) { ` +
+		`inventoryActivate(inventoryItemId: $item, locationId: $loc) ` + dIdempotent + ` { userErrors { field } } }`}
 
 	qVariantPrice = queryDef{Name: "VariantPrice", Cost: 5, Text: `query VariantPrice($id: ID!) { ` + mVariantLookup + ` }`}
 

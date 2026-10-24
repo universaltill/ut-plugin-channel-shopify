@@ -169,6 +169,7 @@ type Shop struct {
 	writes       int
 	calls        int
 	idem         map[string]string // idempotency key -> cached mutation answer
+	keyfp        map[string]string // operation|key -> fingerprint of the input it was first used with
 	acts         map[string]int    // "<kind>:<id>" -> times performed
 	failFO       map[string]bool   // fulfilment orders whose fulfillment is refused
 	schemaErr    map[string]bool   // operations answered with a schema error
@@ -212,7 +213,7 @@ func New(o Options) *Shop {
 	if o.Currency == "" {
 		o.Currency = "GBP"
 	}
-	s := &Shop{opt: o, levels: map[string]*level{}, idem: map[string]string{}, acts: map[string]int{}, codes: map[string]bool{}, tracking: map[string][3]string{},
+	s := &Shop{opt: o, levels: map[string]*level{}, idem: map[string]string{}, keyfp: map[string]string{}, acts: map[string]int{}, codes: map[string]bool{}, tracking: map[string][3]string{},
 		lose: map[string]int{}, noCancel: map[string]bool{}, cancels: map[string]CancelRecord{}, refunds: map[string][]RefundRecord{},
 		jobs: map[string]*cancelJob{}, pending: map[string]string{}, hooks: map[string]func(){}}
 	for i := 0; i < o.Locations; i++ {
@@ -787,6 +788,17 @@ func (s *Shop) graphql(w http.ResponseWriter, r *http.Request) {
 	}
 	if msg := checkVariables(req); msg != "" {
 		writeJSON(w, 200, map[string]any{"errors": []map[string]any{{"message": msg, "extensions": map[string]string{"code": "VARIABLE_MISMATCH"}}}})
+		return
+	}
+	if msg, code := realAPIRefusal(req); msg != "" {
+		writeJSON(w, 200, map[string]any{"errors": []map[string]any{{"message": msg, "extensions": map[string]string{"code": code}}}, "extensions": costExt(0, 0)})
+		return
+	}
+	s.mu.Lock()
+	mismatch := keyMismatch(s.keyfp, req)
+	s.mu.Unlock()
+	if mismatch {
+		writeJSON(w, 200, map[string]any{"errors": []map[string]any{{"message": "The idempotency key was already used with different parameters.", "extensions": map[string]string{"code": "IDEMPOTENCY_KEY_PARAMETER_MISMATCH"}}}, "extensions": costExt(0, 0)})
 		return
 	}
 	if s.opt.GraphQLThrottleEvery > 0 && n%s.opt.GraphQLThrottleEvery == 0 {

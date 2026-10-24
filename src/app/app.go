@@ -149,11 +149,8 @@ func contact(ev channel.Event) (any, error) {
 	}
 	var d struct {
 		Order *struct {
-			Email    string `json:"email"`
-			Phone    string `json:"phone"`
-			Customer *struct {
-				DisplayName string `json:"displayName"`
-			} `json:"customer"`
+			Email   string `json:"email"`
+			Phone   string `json:"phone"`
 			Address *struct {
 				Name     string `json:"name"`
 				Address1 string `json:"address1"`
@@ -173,13 +170,8 @@ func contact(ev channel.Event) (any, error) {
 	}
 	o := d.Order
 	res := channel.ContactResult{Email: clip(o.Email, 200), Phone: clip(o.Phone, 50)}
-	if o.Customer != nil {
-		res.Name = clip(o.Customer.DisplayName, 200)
-	}
 	if a := o.Address; a != nil {
-		if res.Name == "" {
-			res.Name = clip(a.Name, 200)
-		}
+		res.Name = clip(a.Name, 200)
 		var parts []string
 		for _, p := range []string{a.Address1, a.Address2, a.City, a.Province, a.Zip, a.Country} {
 			if p != "" {

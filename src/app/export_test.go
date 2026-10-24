@@ -55,7 +55,6 @@ const (
 	FOrderTax        = fOrderTax
 	FShippingLines   = fShippingLines
 	FCompareField    = fCompareField
-	FCompareOff      = fCompareOff
 	DIdempotent      = dIdempotent
 	MOrderCancel     = mOrderCancel
 	MCancelJob       = mCancelJob

@@ -106,6 +106,18 @@ func TestEveryRequestIsTheOneAccountBoundEndpoint(t *testing.T) {
 	}
 }
 
+// No operation selects the customer object: it needs read_customers, which the
+// Shopify app does not hold, so one query that does makes every order read fail
+// ACCESS_DENIED on a real store (ut-docs#4920). The fake enforces the same.
+func TestNoQuerySelectsTheCustomerObject(t *testing.T) {
+	re := regexp.MustCompile(`\bcustomer\s*[{(]`)
+	for _, q := range app.AllQueries() {
+		if re.MatchString(q) {
+			t.Errorf("a query selects the customer object: %.120s", q)
+		}
+	}
+}
+
 func TestQueriesAreConstantsAndValuesTravelAsVariables(t *testing.T) {
 	e := newEnv(t, fakeshop.Options{})
 	exercise(e)
