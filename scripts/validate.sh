@@ -50,9 +50,11 @@ src = open("src/app/api.go").read()
 am = re.search(r'accountRe = regexp\.MustCompile\(`([^`]*)`\)', src)
 if not am or am.group(1) != acct: errs.append("src/app/api.go accountRe must be identical to channel.account (a trailing hyphen must be refused by both or neither)")
 cap = c.get("capabilities") or {}
-# The adapter can only push a price to an EXISTING variant; it cannot create or edit an item
-# (ut-docs#4774). Declaring items push/both would make the cloud queue listing.upsert for every new item and dead-letter it.
-if cap.get("items") not in ("pull", None): errs.append("capabilities.items must be 'pull' until item creation lands (ut-docs#4774)")
+# items MUST be "both": the cloud's catalogue sweep queues listing.upsert only for push/both (ut-cloud channelsync
+# SweepOutbound), so with "pull" the variant-price push the adapter does implement (ADR-0169 criterion 6) is never queued.
+# The adapter pushes the price of an EXISTING product only: it ignores other fields (listing.fields_ignored) and refuses a
+# create with create_not_supported (ut-docs#4774 adds creation). Pinned in src/app TestCreateUpsertIsRefused*.
+if cap.get("items") != "both": errs.append("capabilities.items must be 'both': the cloud queues price edits only for push/both (the adapter refuses creates, ignores other fields)")
 if cap.get("variants") not in ("pull", "both"): errs.append("capabilities.variants is 'pull' or 'both' (price push to existing variants only)")
 # The adapter does order.cancel and refund.create (ut-docs#4774): without push the cloud never queues them.
 for k in ("fulfilment", "cancel", "refunds"):

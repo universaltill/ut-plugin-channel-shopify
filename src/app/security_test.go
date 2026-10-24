@@ -45,7 +45,7 @@ func exercise(e *env) {
 	e.em.Host.Outbox = append(e.em.Host.Outbox,
 		stockOp("s1", v, i64(11), `{"available": 2}`),
 		fulfilOp("f1", "gid://shopify/Order/5001", `{"external_order_id":"gid://shopify/Order/5001","carrier":"c","tracking_number":"T"}`),
-		channel.OutboxOp{ID: "p1", Kind: channel.OpListingUpsert, ExternalID: e.shop.ProductIDs()[0], Payload: json.RawMessage(fmt.Sprintf(`{"variants":[{"external_id":%q,"price_minor":900,"currency":"GBP"}]}`, v))},
+		channel.OutboxOp{ID: "p1", Kind: channel.OpListingUpsert, ExternalID: v, Payload: json.RawMessage(fmt.Sprintf(`{"variants":[{"external_id":%q,"price_minor":900,"currency":"GBP"}]}`, v))},
 		channel.OutboxOp{ID: "u1", Kind: channel.OpListingUnpublish, ExternalID: e.shop.ProductIDs()[1]},
 		channel.OutboxOp{ID: "d1", Kind: "listing.delete", ExternalID: e.shop.ProductIDs()[1]},
 		channel.OutboxOp{ID: "c0", Kind: channel.OpOrderCancel, ExternalID: "gid://shopify/Order/5001", Payload: json.RawMessage(`{"reason":"other"}`)},
@@ -123,7 +123,7 @@ func TestQueriesAreConstantsAndValuesTravelAsVariables(t *testing.T) {
 		}
 		ops[r.Op] = true
 	}
-	for _, want := range []string{"ConnectTest", "Products", "Locations", "Levels", "Orders", "Order", "Contact", "StockTarget", "InventorySet", "VariantPrices", "FulfilmentOrders", "FulfillmentCreate",
+	for _, want := range []string{"ConnectTest", "Products", "Locations", "Levels", "Orders", "Order", "Contact", "StockTarget", "InventorySet", "VariantPrice", "VariantPrices", "FulfilmentOrders", "FulfillmentCreate",
 		"OrderCancel", "RefundState", "SuggestedRefund", "RefundCreate"} {
 		if !ops[want] {
 			t.Errorf("operation %s was never exercised", want)

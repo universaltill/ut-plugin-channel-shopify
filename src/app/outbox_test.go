@@ -237,46 +237,171 @@ func TestFulfilmentDropsATrackingURLThatIsNotHTTPS(t *testing.T) {
 	}
 }
 
-func TestPriceEditReachesShopifyAndNothingIsDeleted(t *testing.T) {
+// cloudUpsert is the listing.upsert the cloud really sends for an imported
+// item, copied from ut-cloud internal/channelsync/outbound.go (upsertPayload,
+// build): the top-level external_id AND variants[0].external_id are the
+// channel LISTING's external id, which for a Shopify item is the VARIANT id
+// (internal/channelsync/convert.go). If the cloud's shape changes, change this
+// copy: the adapter tests must follow the cloud, not the other way round.
+func cloudUpsert(id, variant string, priceMinor int64, currency string, extra ...string) channel.OutboxOp {
+	body := fmt.Sprintf(`{"cloud_id":"00000000-0000-4000-8000-000000000001","external_id":%q,"name":"Invented item","description":"d",`+
+		`"status":"active","category_path":["A","B"],"variants":[{"external_id":%q,"cloud_id":"00000000-0000-4000-8000-000000000001",`+
+		`"sku":"INV-1","barcodes":["5000000000000"],"price_minor":%d,"currency":%q,"tax_included":true}]}`, variant, variant, priceMinor, currency)
+	return channel.OutboxOp{ID: id, Kind: channel.OpListingUpsert, ExternalID: variant, Payload: json.RawMessage(body)}
+}
+
+func TestPriceEditInTheCloudsRealShapeReachesShopifyAndKeepsTheVariantLink(t *testing.T) {
 	e := newEnv(t, fakeshop.Options{})
-	p, v := e.shop.ProductIDs()[0], e.shop.VariantIDs(1)[0]
+	v := e.shop.VariantIDs(1)[0]
 	other := e.shop.VariantIDs(1)[1]
-	op := channel.OutboxOp{ID: "op-1", Kind: channel.OpListingUpsert, ExternalID: p,
-		Payload: json.RawMessage(fmt.Sprintf(`{"variants":[{"external_id":%q,"price_minor":3500,"currency":"GBP"}]}`, v))}
-	if a := e.outbox(op)["op-1"]; a.Error != nil || a.ExternalID != p {
+	a := e.outbox(cloudUpsert("op-1", v, 3500, "GBP"))["op-1"]
+	// The ack's external id is written onto the listing by the cloud: it must
+	// stay the VARIANT id, never the product id.
+	if a.Error != nil || a.ExternalID != v || a.ExternalID == e.shop.ProductIDs()[0] {
 		t.Fatalf("ack %+v", a)
 	}
 	if e.shop.Price(v) != "35.00" || e.shop.Price(other) != "6.11" {
 		t.Fatalf("prices %q %q", e.shop.Price(v), e.shop.Price(other))
 	}
-	// A price in another currency is not converted: it is refused.
-	op2 := channel.OutboxOp{ID: "op-2", Kind: channel.OpListingUpsert, ExternalID: p,
-		Payload: json.RawMessage(fmt.Sprintf(`{"variants":[{"external_id":%q,"price_minor":100,"currency":"EUR"}]}`, v))}
-	if a := e.outbox(op2)["op-2"]; a.Error == nil || a.Error.Code != "currency_mismatch" || a.Error.Retryable || e.shop.Price(v) != "35.00" {
-		t.Fatalf("%+v %q", a, e.shop.Price(v))
-	}
-	// A variant of another product, a bad price, a bad id: refused, nothing changes.
-	foreign := e.shop.VariantIDs(2)[0]
-	for i, body := range []string{
-		fmt.Sprintf(`{"variants":[{"external_id":%q,"price_minor":100,"currency":"GBP"}]}`, foreign),
-		fmt.Sprintf(`{"variants":[{"external_id":%q,"price_minor":-1,"currency":"GBP"}]}`, v),
-		`{"variants":[{"external_id":"../../x","price_minor":100,"currency":"GBP"}]}`,
-		`{"variants":[]}`,
-		`"nope"`,
-	} {
-		id := fmt.Sprintf("bad-%d", i)
-		a := e.outbox(channel.OutboxOp{ID: id, Kind: channel.OpListingUpsert, ExternalID: p, Payload: json.RawMessage(body)})[id]
-		if a.Error == nil || a.Error.Retryable {
-			t.Errorf("case %d: %+v", i, a)
+	// The write names the variant's own product and only that variant.
+	for _, r := range e.shop.Requests() {
+		if r.Op == "VariantPrices" && string(r.Variables["productId"]) != `"`+e.shop.ProductIDs()[0]+`"` {
+			t.Errorf("wrong product in the write: %s", r.Variables["productId"])
 		}
 	}
-	if e.shop.Price(foreign) != "7.10" || e.shop.Price(v) != "35.00" {
+}
+
+func TestPriceAlreadyEqualIsAckedWithoutAWrite(t *testing.T) {
+	e := newEnv(t, fakeshop.Options{})
+	v := e.shop.VariantIDs(1)[0]
+	e.outbox(cloudUpsert("op-1", v, 3500, "GBP"))
+	w := e.shop.Writes()
+	a := e.outbox(cloudUpsert("op-2", v, 3500, "GBP"))["op-2"]
+	if a.Error != nil || a.ExternalID != v || e.shop.Writes() != w {
+		t.Fatalf("%+v writes %d -> %d", a, w, e.shop.Writes())
+	}
+}
+
+func TestPriceEditRefusals(t *testing.T) {
+	e := newEnv(t, fakeshop.Options{})
+	v := e.shop.VariantIDs(1)[0]
+	a := e.outbox(cloudUpsert("op-1", v, 3500, "GBP"))["op-1"]
+	if a.Error != nil {
+		t.Fatal(a)
+	}
+	w := e.shop.Writes()
+	// Another currency is refused, not converted.
+	if a := e.outbox(cloudUpsert("cur", v, 100, "EUR"))["cur"]; a.Error == nil || a.Error.Code != "currency_mismatch" || a.Error.Retryable {
+		t.Fatalf("%+v", a)
+	}
+	// Zero and negative prices never reach the shop (a free live product).
+	for _, n := range []int64{0, -1} {
+		id := fmt.Sprintf("p%d", n)
+		if a := e.outbox(cloudUpsert(id, v, n, "GBP"))[id]; a.Error == nil || a.Error.Code != "invalid_price" || a.Error.Retryable {
+			t.Errorf("price %d: %+v", n, a)
+		}
+	}
+	// A variant that does not exist, or whose id is not a variant gid.
+	missing := "gid://shopify/ProductVariant/999999999"
+	if a := e.outbox(cloudUpsert("miss", missing, 100, "GBP"))["miss"]; a.Error == nil || a.Error.Code != "not_found" || a.Error.Retryable {
+		t.Fatalf("%+v", a)
+	}
+	asProduct := e.shop.ProductIDs()[0] // the old, wrong convention
+	for i, op := range []channel.OutboxOp{
+		cloudUpsert("prod", asProduct, 100, "GBP"),
+		cloudUpsert("bad", "../../x", 100, "GBP"),
+		{ID: "mismatch", Kind: channel.OpListingUpsert, ExternalID: v, Payload: json.RawMessage(fmt.Sprintf(
+			`{"variants":[{"external_id":%q,"price_minor":100,"currency":"GBP"}]}`, e.shop.VariantIDs(2)[0]))},
+		{ID: "two", Kind: channel.OpListingUpsert, ExternalID: v, Payload: json.RawMessage(fmt.Sprintf(
+			`{"variants":[{"external_id":%q,"price_minor":100,"currency":"GBP"},{"external_id":%q,"price_minor":100,"currency":"GBP"}]}`, v, e.shop.VariantIDs(1)[1]))},
+		{ID: "empty", Kind: channel.OpListingUpsert, ExternalID: v, Payload: json.RawMessage(`{"variants":[]}`)},
+		{ID: "str", Kind: channel.OpListingUpsert, ExternalID: v, Payload: json.RawMessage(`"nope"`)},
+	} {
+		a := e.outbox(op)[op.ID]
+		if a.Error == nil || a.Error.Code != "invalid_payload" || a.Error.Retryable {
+			t.Errorf("case %d (%s): %+v", i, op.ID, a)
+		}
+	}
+	if e.shop.Price(v) != "35.00" || e.shop.Price(e.shop.VariantIDs(2)[0]) != "7.10" || e.shop.Writes() != w {
 		t.Error("a refused price edit changed a price")
 	}
 }
 
-// listing.unpublish is not declared by the manifest (items is "pull": a draft
-// is an item push, ut-docs#4774), so it is never acted on.
+// A price above the variant's compare-at is pushed, not refused (README row
+// says what to look for).
+func TestPriceAboveCompareAtIsStillPushed(t *testing.T) {
+	e := newEnv(t, fakeshop.Options{})
+	v := e.shop.VariantIDs(1)[0]
+	if a := e.outbox(cloudUpsert("op-1", v, 99999, "GBP"))["op-1"]; a.Error != nil || e.shop.Price(v) != "999.99" {
+		t.Fatalf("%+v %q", a, e.shop.Price(v))
+	}
+}
+
+// The cloud sends the whole listing record. Only the variant price is pushed;
+// the rest is ignored and counted once per ask, on success only.
+func TestUpsertWithOtherFieldsPushesThePriceAndCountsIgnoredFields(t *testing.T) {
+	e := newEnv(t, fakeshop.Options{})
+	v, v1b := e.shop.VariantIDs(1)[0], e.shop.VariantIDs(1)[1]
+	count := func(env *env) int {
+		n := 0
+		for _, l := range env.em.Host.Logs {
+			if l.Code == "listing.fields_ignored" {
+				n++
+			}
+		}
+		return n
+	}
+	// Two ops in the one ask: the code is logged once, not per op.
+	acks := e.outbox(cloudUpsert("op-1", v, 4200, "GBP"), cloudUpsert("op-1b", v1b, 100, "GBP"))
+	if acks["op-1"].Error != nil || acks["op-1b"].Error != nil || e.shop.Price(v) != "42.00" {
+		t.Fatalf("%+v", acks)
+	}
+	if n := count(e); n != 1 {
+		t.Fatalf("listing.fields_ignored logged %d times, want once", n)
+	}
+	// A later ask logs again (the once is per ask).
+	e.outbox(cloudUpsert("op-1c", v1b, 200, "GBP"))
+	if n := count(e); n != 2 {
+		t.Fatalf("a second ask logged %d in all, want 2", n)
+	}
+	// An op that FAILS (currency, zero price, unknown variant) logs nothing.
+	e3 := newEnv(t, fakeshop.Options{})
+	v3 := e3.shop.VariantIDs(1)[0]
+	e3.outbox(cloudUpsert("f1", v3, 100, "EUR"), cloudUpsert("f2", v3, 0, "GBP"), cloudUpsert("f3", "gid://shopify/ProductVariant/999999999", 100, "GBP"))
+	if n := count(e3); n != 0 {
+		t.Errorf("fields_ignored logged %d times for ops that failed", n)
+	}
+	// Price only: nothing ignored, nothing logged.
+	e2 := newEnv(t, fakeshop.Options{})
+	v2 := e2.shop.VariantIDs(1)[0]
+	e2.outbox(channel.OutboxOp{ID: "op-2", Kind: channel.OpListingUpsert, ExternalID: v2,
+		Payload: json.RawMessage(fmt.Sprintf(`{"variants":[{"external_id":%q,"price_minor":100,"currency":"GBP"}]}`, v2))})
+	if n := count(e2); n != 0 {
+		t.Error("logged for a price-only upsert")
+	}
+}
+
+// A create (no external id) is refused for good and sends nothing: the adapter
+// cannot create products (ut-docs#4774).
+func TestCreateUpsertIsRefusedNonRetryablyAndSendsNothing(t *testing.T) {
+	e := newEnv(t, fakeshop.Options{})
+	for i, body := range []string{
+		`{"name":"New thing","variants":[{"external_id":"","price_minor":100,"currency":"GBP"}]}`,
+		`{"name":"New thing"}`, `"nope"`, ``,
+	} {
+		id := fmt.Sprintf("c-%d", i)
+		a := e.outbox(channel.OutboxOp{ID: id, Kind: channel.OpListingUpsert, ExternalID: "", Payload: json.RawMessage(body)})[id]
+		if a.Error == nil || a.Error.Code != "create_not_supported" || a.Error.Retryable {
+			t.Errorf("case %d: %+v", i, a)
+		}
+	}
+	if len(e.shop.Requests()) != 0 {
+		t.Errorf("a refused create made %d requests", len(e.shop.Requests()))
+	}
+}
+
+// listing.unpublish is not done (a draft is an item push, ut-docs#4774) even
+// though items is "both", so it is never acted on.
 func TestUnpublishIsNotActedOnAndIsDeadLetteredWithALoggedCode(t *testing.T) {
 	e := newEnv(t, fakeshop.Options{})
 	p := e.shop.ProductIDs()[0]
@@ -468,11 +593,9 @@ func TestAnAckFailureStopsTheDrainInsteadOfRepeatingTheOp(t *testing.T) {
 
 func TestTheDrainAlsoStopsOnTheRequestBudgetWhenRequestsAreCheap(t *testing.T) {
 	e := newEnv(t, fakeshop.Options{})
-	p := e.shop.ProductIDs()[0]
 	v := e.shop.VariantIDs(1)[0]
 	for i := 0; i < 100; i++ { // one 5-point request each (the shop's currency), refused: wrong currency
-		e.em.Host.Outbox = append(e.em.Host.Outbox, channel.OutboxOp{ID: fmt.Sprintf("cur-%03d", i), Kind: channel.OpListingUpsert, ExternalID: p,
-			Payload: json.RawMessage(fmt.Sprintf(`{"variants":[{"external_id":%q,"price_minor":100,"currency":"EUR"}]}`, v))})
+		e.em.Host.Outbox = append(e.em.Host.Outbox, cloudUpsert(fmt.Sprintf("cur-%03d", i), v, 100, "EUR"))
 	}
 	e.ask(channel.AskOutbox, struct{}{})
 	if n := len(e.em.Host.Acks); n == 0 || n >= 100 || e.em.HTTPCalls() > app.DrainHTTPBudget {

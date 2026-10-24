@@ -58,7 +58,11 @@ const (
 
 // spent counts what the current ask has used: requests, host calls
 // (channel_http, submit, outbox, cursor, log) and requested GraphQL cost.
-var spent struct{ http, host, cost int }
+var spent struct {
+	http, host, cost int
+	// ignoredLogged: listing.fields_ignored is logged once per ask.
+	ignoredLogged bool
+}
 
 // errOverBudget stops an ask between units of work; the work resumes next ask.
 var errOverBudget = errors.New("the ask used its budget")
@@ -69,7 +73,7 @@ func budgetedHandlers(h channel.Handlers) channel.Handlers {
 	for k, f := range h {
 		f := f
 		out[k] = func(ev channel.Event) (any, error) {
-			spent.http, spent.host, spent.cost = 0, 0, 0
+			spent.http, spent.host, spent.cost, spent.ignoredLogged = 0, 0, 0, false
 			pullOrdersAfterDrain = false
 			return f(ev)
 		}
