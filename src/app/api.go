@@ -81,6 +81,22 @@ func okGID(t, id string) bool {
 // works on the decoded string (see there).
 const maxTitleBytes = 250
 
+// maxCategoryRunes bounds the one category of an item: the cloud refuses a
+// category name over 60 characters (ut-cloud catalogwrite/rules
+// MaxCategoryNameRunes), and a refused name fails the whole import row.
+const maxCategoryRunes = 60
+
+// categoryName cleans a category text: invalid UTF-8 dropped, cut to
+// maxCategoryRunes on a rune boundary, trimmed AFTER the cut (a cut that ends
+// on a space would never equal what Shopify stores).
+func categoryName(s string) string {
+	r := []rune(strings.ToValidUTF8(strings.TrimSpace(s), ""))
+	if len(r) > maxCategoryRunes {
+		r = r[:maxCategoryRunes]
+	}
+	return strings.TrimSpace(string(r))
+}
+
 // Page sizes keep the REQUESTED GraphQL cost of every query under Shopify's
 // 1,000-point single-query limit; the per-ask budgets (budget.go) bound how
 // much of that an ask may spend.

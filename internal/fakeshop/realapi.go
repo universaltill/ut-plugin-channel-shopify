@@ -20,8 +20,18 @@ import (
 //     quantity must include changeFromQuantity (null = no compare).
 //   - the fake's token has no read_customers scope, so selecting `customer`
 //     on an order is ACCESS_DENIED.
+//   - Product.category is an object (TaxonomyCategory): selecting it bare is
+//     refused; collections needs first or last; productUpdate takes
+//     product: ProductUpdateInput! (the old input: argument is gone), the
+//     input's category is a taxonomy ID (so a name there is refused), and
+//     its userErrors are UserError (field, message): no code.
 //
 // customerRe matches the selection of the customer object in any spelling.
+var (
+	bareCategoryRe     = regexp.MustCompile(`\bcategory\s*[^{\s(]`)
+	collectionsNoArgRe = regexp.MustCompile(`\bcollections\s*\{`)
+	userErrCodeRe      = regexp.MustCompile(`userErrors\s*\{[^}]*\bcode\b`)
+)
 var customerRe = regexp.MustCompile(`\bcustomer\s*[{(]`)
 
 func realAPIRefusal(req gqlRequest) (msg, code string) {
@@ -44,6 +54,34 @@ func realAPIRefusal(req gqlRequest) (msg, code string) {
 		for _, line := range in.Quantities {
 			if _, ok := line["changeFromQuantity"]; !ok {
 				return "InventoryQuantityInput must include the following argument: changeFromQuantity.", "INVALID_FIELD_ARGUMENTS"
+			}
+		}
+	}
+	if bareCategoryRe.MatchString(q) {
+		return "Field must have selections (field 'category' returns TaxonomyCategory but has no selections. Did you mean 'category { ... }'?)", "selectionMismatch"
+	}
+	if collectionsNoArgRe.MatchString(q) {
+		return "you must provide one of first or last", "BAD_REQUEST"
+	}
+	if strings.Contains(q, "productUpdate(") {
+		if !strings.Contains(q, "productUpdate(product:") {
+			return "Field 'productUpdate' doesn't accept argument 'input'", "argumentNotAccepted"
+		}
+		if userErrCodeRe.MatchString(q) {
+			return "Field 'code' doesn't exist on type 'UserError'", "undefinedField"
+		}
+		var in map[string]json.RawMessage
+		if json.Unmarshal(req.Variables["product"], &in) == nil {
+			for k, raw := range in {
+				switch k {
+				case "id", "productType":
+					var sv string
+					if json.Unmarshal(raw, &sv) != nil {
+						return "Variable $product of type ProductUpdateInput! was provided invalid value for " + k + " (Could not coerce value to String)", "INVALID_VARIABLE"
+					}
+				default:
+					return "Variable $product of type ProductUpdateInput! was provided invalid value for " + k + " (the adapter only ever sets productType)", "INVALID_VARIABLE"
+				}
 			}
 		}
 	}

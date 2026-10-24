@@ -6,7 +6,7 @@ package app
 func AllQueries() []string {
 	var out []string
 	for _, q := range []queryDef{qConnectTest, qProducts, qMoreVariants, qShopCurrency, qLocations, qLevels, qOrders, qOrder, qOrderLines, qContact,
-		qStockTarget, qInventorySet, qInventoryActivate, qVariantPrice, qVariantPrices, qFulfilmentOrders, qFulfillmentCreate,
+		qStockTarget, qInventorySet, qInventoryActivate, qVariantPrice, qVariantPrices, qProductType, qFulfilmentOrders, qFulfillmentCreate,
 		qOrderCancel, qCancelJob, qRefundState, qSuggestedRefund, qRefundCreate} {
 		out = append(out, q.Text)
 	}
@@ -55,6 +55,9 @@ const (
 	FOrderTax        = fOrderTax
 	FShippingLines   = fShippingLines
 	FCompareField    = fCompareField
+	FCategory        = fCategory
+	FCompareAt       = fCompareAt
+	MProductType     = mProductType
 	DIdempotent      = dIdempotent
 	MOrderCancel     = mOrderCancel
 	MCancelJob       = mCancelJob

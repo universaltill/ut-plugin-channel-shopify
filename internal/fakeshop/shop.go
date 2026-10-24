@@ -72,6 +72,7 @@ type hostile struct{ endless, foreign, echo, huge bool }
 
 type variant struct {
 	ID, SKU, Barcode, Price, ItemID string
+	CompareAt                       string // "" = null
 	Taxable                         bool
 	Options                         [][2]string
 	Tracked                         bool
@@ -79,7 +80,12 @@ type variant struct {
 
 type product struct {
 	ID, Title, Desc, Status, UpdatedAt string
-	Variants                           []variant
+	// ProductType is the merchant's free-text type; Taxonomy the name of the
+	// standard product category ("" = none); Collections the titles, in the
+	// order Shopify lists them.
+	ProductType, Taxonomy string
+	Collections           []string
+	Variants              []variant
 }
 
 type level struct {
@@ -184,6 +190,7 @@ type Shop struct {
 	cancelPolls  int  // job queries until the next cancel job is done (0: done at once)
 	oddJob       *obj // the next cancel is accepted with this job in the answer (nil job: no job) and not carried out
 	oddJobSet    bool
+	refuseType   bool // productUpdate answers a userError
 	failJob      bool // the next cancel job ends done without cancelling
 	jobs         map[string]*cancelJob
 	pending      map[string]string // order id -> job id of a cancel still running
@@ -503,6 +510,60 @@ func (s *Shop) SetPrice(variantID, price string) {
 	s.mu.Lock()
 	if v, p := s.findVariant(variantID); v != nil {
 		v.Price = price
+		p.UpdatedAt = s.bump()
+	}
+	s.mu.Unlock()
+}
+
+// SetCategory sets what the merchant did in Shopify's admin: the product
+// type, the standard category's name and the collections the product is in.
+func (s *Shop) SetCategory(productID, productType, taxonomy string, collections ...string) {
+	s.mu.Lock()
+	for i := range s.products {
+		if s.products[i].ID == productID {
+			s.products[i].ProductType, s.products[i].Taxonomy, s.products[i].Collections = productType, taxonomy, collections
+			s.products[i].UpdatedAt = s.bump()
+		}
+	}
+	s.mu.Unlock()
+}
+
+// RefuseProductType makes productUpdate answer a userError.
+func (s *Shop) RefuseProductType(on bool) {
+	s.mu.Lock()
+	s.refuseType = on
+	s.mu.Unlock()
+}
+
+// ProductType is a product's type as the shop holds it.
+func (s *Shop) ProductType(productID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.products {
+		if p.ID == productID {
+			return p.ProductType
+		}
+	}
+	return ""
+}
+
+// Collections are a product's collection titles (the adapter never edits them).
+func (s *Shop) Collections(productID string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.products {
+		if p.ID == productID {
+			return append([]string(nil), p.Collections...)
+		}
+	}
+	return nil
+}
+
+// SetCompareAt sets a variant's compare-at price ("" clears it).
+func (s *Shop) SetCompareAt(variantID, price string) {
+	s.mu.Lock()
+	if v, p := s.findVariant(variantID); v != nil {
+		v.CompareAt = price
 		p.UpdatedAt = s.bump()
 	}
 	s.mu.Unlock()

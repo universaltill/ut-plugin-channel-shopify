@@ -156,9 +156,11 @@ func (s *Shop) dispatch(req gqlRequest) (any, string) {
 			case "noproduct": // a variant whose product is gone
 				return obj{"productVariant": obj{"id": v.ID, "product": nil, "price": v.Price}}, ""
 			}
-			return obj{"productVariant": obj{"id": v.ID, "product": obj{"id": pr.ID}, "price": v.Price}}, ""
+			return obj{"productVariant": obj{"id": v.ID, "product": obj{"id": pr.ID, "productType": pr.ProductType, "category": taxonomyJSON(*pr), "collections": collectionsJSON(*pr)}, "price": v.Price}}, ""
 		}
 		return obj{"productVariant": nil}, ""
+	case "ProductType":
+		return s.opProductType(req), ""
 	case "VariantPrices":
 		return s.opPrices(req), ""
 	case "FulfilmentOrders":
@@ -204,7 +206,11 @@ func (s *Shop) variantPage(p product, first int, after string) obj {
 		if v.Barcode != "" {
 			bc = v.Barcode
 		}
-		nodes = append(nodes, obj{"id": v.ID, "sku": v.SKU, "barcode": bc, "price": v.Price, "taxable": v.Taxable,
+		var cmp any
+		if v.CompareAt != "" {
+			cmp = v.CompareAt
+		}
+		nodes = append(nodes, obj{"id": v.ID, "sku": v.SKU, "barcode": bc, "price": v.Price, "compareAtPrice": cmp, "taxable": v.Taxable,
 			"selectedOptions": opts, "inventoryItem": obj{"tracked": v.Tracked}})
 	}
 	return obj{"pageInfo": pi(more, ec), "nodes": nodes}
@@ -235,6 +241,7 @@ func (s *Shop) opProducts(req gqlRequest) obj {
 			id = "gid://shopify/Product/../../admin"
 		}
 		nodes = append(nodes, obj{"id": id, "title": title, "description": p.Desc, "status": p.Status, "updatedAt": p.UpdatedAt,
+			"productType": p.ProductType, "category": taxonomyJSON(p), "collections": collectionsJSON(p),
 			"variants": s.variantPage(p, s.num(req, "vfirst", 50), "")})
 	}
 	return obj{"shop": shop, "products": obj{"pageInfo": pi(more, ec), "nodes": nodes}}
@@ -695,4 +702,42 @@ func (s *Shop) SetOptions(variantID string, opts [][2]string) {
 	if v, _ := s.findVariant(variantID); v != nil {
 		v.Options = opts
 	}
+}
+
+func taxonomyJSON(p product) any {
+	if p.Taxonomy == "" {
+		return nil
+	}
+	return obj{"name": p.Taxonomy}
+}
+
+// collectionsJSON answers collections(first: 1): the first collection only.
+func collectionsJSON(p product) obj {
+	n := []obj{}
+	if len(p.Collections) > 0 {
+		n = append(n, obj{"title": p.Collections[0]})
+	}
+	return obj{"nodes": n}
+}
+
+// opProductType is productUpdate(product: {id, productType}). It changes the
+// product type and nothing else; an unknown product is a userError.
+func (s *Shop) opProductType(req gqlRequest) obj {
+	var in struct {
+		ID          string `json:"id"`
+		ProductType string `json:"productType"`
+	}
+	s.vars(req, "product", &in)
+	if s.refuseType {
+		return obj{"productUpdate": obj{"userErrors": []obj{{"field": []string{"productType"}}}}}
+	}
+	for i := range s.products {
+		if s.products[i].ID == in.ID {
+			s.products[i].ProductType = in.ProductType
+			s.products[i].UpdatedAt = s.bump()
+			s.acts["producttype:"+in.ID]++
+			return obj{"productUpdate": obj{"userErrors": []obj{}}}
+		}
+	}
+	return obj{"productUpdate": obj{"userErrors": []obj{{"field": []string{"id"}}}}}
 }

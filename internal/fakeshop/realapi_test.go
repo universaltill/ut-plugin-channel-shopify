@@ -40,6 +40,16 @@ func TestRealAPIRefusal(t *testing.T) {
 		{"customer without a space", gqlRequest{Query: `query O($id: ID!) { order(id: $id) { id customer{ id } } }`}, "ACCESS_DENIED"},
 		{"customer on a new line", gqlRequest{Query: "query O($id: ID!) { order(id: $id) { id customer\n{ id } } }"}, "ACCESS_DENIED"},
 		{"notifyCustomer is not the object", gqlRequest{Query: `mutation C($n: Boolean) { orderCancel(notifyCustomer: $n) { userErrors { field } } }`}, ""},
+		{"category needs a selection", gqlRequest{Query: `query P { products(first: 1) { nodes { id category } } }`}, "selectionMismatch"},
+		{"category with a selection", gqlRequest{Query: `query P { products(first: 1) { nodes { id category { name } } } }`}, ""},
+		{"collections need first", gqlRequest{Query: `query P { products(first: 1) { nodes { collections { nodes { title } } } } }`}, "BAD_REQUEST"},
+		{"collections with first", gqlRequest{Query: `query P { products(first: 1) { nodes { collections(first: 1) { nodes { title } } } } }`}, ""},
+		{"productUpdate has no input argument", gqlRequest{Query: `mutation P($p: ProductUpdateInput!) { productUpdate(input: $p) { userErrors { field } } }`}, "argumentNotAccepted"},
+		{"productUpdate userErrors have no code", gqlRequest{Query: `mutation P($product: ProductUpdateInput!) { productUpdate(product: $product) { userErrors { code } } }`}, "undefinedField"},
+		{"productUpdate with product and field", gqlRequest{Query: `mutation P($product: ProductUpdateInput!) { productUpdate(product: $product) { userErrors { field } } }`,
+			Variables: map[string]json.RawMessage{"product": json.RawMessage(`{"id":"gid://shopify/Product/1","productType":"Shirts"}`)}}, ""},
+		{"productUpdate category is a taxonomy id, not a name", gqlRequest{Query: `mutation P($product: ProductUpdateInput!) { productUpdate(product: $product) { userErrors { field } } }`,
+			Variables: map[string]json.RawMessage{"product": json.RawMessage(`{"id":"gid://shopify/Product/1","category":"Shirts"}`)}}, "INVALID_VARIABLE"},
 		{"order without customer", gqlRequest{Query: `query O($id: ID!) { order(id: $id) { id shippingAddress { name } } }`}, ""},
 	}
 	for _, c := range cases {

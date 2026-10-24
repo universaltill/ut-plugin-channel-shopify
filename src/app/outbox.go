@@ -481,7 +481,8 @@ func listingUpsert(op channel.OutboxOp) channel.Ack {
 		return fail("create_not_supported", false)
 	}
 	var p struct {
-		Variants []struct {
+		CategoryPath []string `json:"category_path"`
+		Variants     []struct {
 			ExternalID string `json:"external_id"`
 			PriceMinor int64  `json:"price_minor"`
 			Currency   string `json:"currency"`
@@ -524,6 +525,7 @@ func listingUpsert(op channel.OutboxOp) channel.Ack {
 			ID      string `json:"id"`
 			Product *struct {
 				ID string `json:"id"`
+				gqlCategorised
 			} `json:"product"`
 			Price string `json:"price"`
 		} `json:"productVariant"`
@@ -534,35 +536,69 @@ func listingUpsert(op channel.OutboxOp) channel.Ack {
 	if cur.Variant == nil || cur.Variant.Product == nil || cur.Variant.ID != op.ExternalID || !okGID(tProduct, cur.Variant.Product.ID) {
 		return fail("not_found", false)
 	}
-	if now, ok := parseMoney(cur.Variant.Price, want.Currency); ok && now == want.PriceMinor {
+	// The item's ONE category goes to Shopify as productType and nothing else
+	// (ut-docs#4944; collections and the standard category are never edited).
+	// The leaf of the path is the category; an empty path writes nothing.
+	wantType := ""
+	if n := len(p.CategoryPath); n > 0 {
+		wantType = categoryName(p.CategoryPath[n-1])
+	}
+	// Written ONLY to a product that has no category at all in Shopify (no type,
+	// no standard category, no collection): the cloud sends category_path on
+	// every upsert, so a rule that overwrote would undo a merchant's own change
+	// at the next price edit. Changing an existing category needs the cloud to
+	// send it only when the item's category changed (proposal on ut-docs#4942).
+	writeType := wantType != "" && cur.Variant.Product.single() == ""
+	now, ok := parseMoney(cur.Variant.Price, want.Currency)
+	if ok && now == want.PriceMinor && !writeType {
 		logFieldsIgnored(op)
 		return channel.Ack{ExternalID: op.ExternalID} // already there: no write
 	}
-	var r struct {
-		Update struct {
-			Errors []userError `json:"userErrors"`
-		} `json:"productVariantsBulkUpdate"`
+	if !ok || now != want.PriceMinor {
+		var r struct {
+			Update struct {
+				Errors []userError `json:"userErrors"`
+			} `json:"productVariantsBulkUpdate"`
+		}
+		inputs := []map[string]any{{"id": op.ExternalID, "price": formatMoney(want.PriceMinor, want.Currency)}}
+		// An absolute price is safe to repeat, so the host may re-send it.
+		if err := run(qVariantPrices, map[string]any{"productId": cur.Variant.Product.ID, "variants": inputs}, op.ID, &r); err != nil {
+			return failFor(err)
+		}
+		switch code := userErrCode(r.Update.Errors); {
+		case code == "":
+		case strings.Contains(code, "DOES_NOT_EXIST"):
+			return fail("not_found", false)
+		default:
+			return fail("rejected_by_channel", false)
+		}
 	}
-	inputs := []map[string]any{{"id": op.ExternalID, "price": formatMoney(want.PriceMinor, want.Currency)}}
-	// An absolute price is safe to repeat, so the host may re-send it.
-	if err := run(qVariantPrices, map[string]any{"productId": cur.Variant.Product.ID, "variants": inputs}, op.ID, &r); err != nil {
-		return failFor(err)
+	if writeType {
+		var r struct {
+			Update struct {
+				Errors []userError `json:"userErrors"`
+			} `json:"productUpdate"`
+		}
+		in := map[string]any{kProductID: cur.Variant.Product.ID, kProductType: wantType}
+		// An absolute type is safe to repeat.
+		if err := run(qProductType, map[string]any{"product": in}, op.ID+keyType, &r); err != nil {
+			return failFor(err)
+		}
+		if len(r.Update.Errors) > 0 {
+			// The price is already written and acked: a refused category must not
+			// dead-letter it (nor every later price edit of the item). Logged, no text.
+			hostLog(channel.LevelWarn, "listing.category_rejected", nil)
+		}
 	}
-	switch code := userErrCode(r.Update.Errors); {
-	case code == "":
-		logFieldsIgnored(op)
-		return channel.Ack{ExternalID: op.ExternalID}
-	case strings.Contains(code, "DOES_NOT_EXIST"):
-		return fail("not_found", false)
-	}
-	return fail("rejected_by_channel", false)
+	logFieldsIgnored(op)
+	return channel.Ack{ExternalID: op.ExternalID}
 }
 
 // Content fields of a listing record that this adapter does not push. Only
 // these are counted: structural keys (cloud_id, external_id, variants,
 // currency, price_minor, tax_included) are not fields the owner edited.
 var (
-	ignoredTop     = []string{"name", "description", "status", "category_path", "category", "images", "image", "tags"}
+	ignoredTop     = []string{"name", "description", "status", "category", "images", "image", "tags"}
 	ignoredVariant = []string{"sku", "barcodes", "compare_at_minor"}
 )
 
