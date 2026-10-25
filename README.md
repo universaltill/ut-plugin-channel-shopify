@@ -159,8 +159,21 @@ connection's verified account and adds the access token.
   (our earlier attempt, or the shop's own refund); otherwise it refunds only
   the delta still owed (never more than the line's `quantity`), then asks
   Shopify what those units come to (`suggestedRefund`) and **refuses, before
-  sending anything, an amount above `max_amount_minor`** (`refund_exceeds_ceiling`,
-  non-retryable). A currency other than the shop's is `currency_mismatch`. A
+  sending anything, an amount above the cap** (`refund_exceeds_ceiling`,
+  non-retryable). The cap is `max_amount_minor` less any money refunded in the
+  Shopify admin since the op was queued: `max_amount_minor - max(0,
+  totalRefundedSet now - refunded_before_minor)`, never below 0 (contract
+  section 8.4). An op without `refunded_before_minor` (queued before the cloud
+  sent it) uses a baseline of 0, the conservative choice; a value outside
+  0..999999999999 is `invalid_payload`; an unreadable or foreign-currency
+  refunded total is `rejected_by_channel`, before any mutation. After a
+  successful `refundCreate` the money the refund moved (`refund.totalRefundedSet`)
+  is acked as `refunded_amount_minor`; if the answer cannot be read the refund
+  is acked without it (the cloud then counts the ceiling) and `refund.amount_unread`
+  is logged. The "already refunded" and race-then-reread successes carry no
+  amount; so does a `refundCreate` answered with a GraphQL error whose re-read
+  shows nothing owed (the refund was made, a field of the answer failed), which
+  is never dead-lettered. A currency other than the shop's is `currency_mismatch`. A
   line is restocked only when every owed unit of it is to go back: an
   unfulfilled order restocks as `CANCEL`, a fulfilled one as `RETURN` to the
   one location it shipped from (`location_required` if there are several, never
@@ -198,6 +211,7 @@ and a test keeps them there. First run on the development store, in this order:
 | *Verified 2026-10-24 (read-only).* `Product.productType` (String), `Product.category { name }` (TaxonomyCategory, an object: a bare `category` is refused) and `collections(first: 1) { nodes { title } }` (needs `first`) are read on import and by the price push; the ONE category is `productType`, else the standard category's name, else the first collection, else none (ut-docs#4944). The dev store's page of 4 products (few variants) had a requested cost of 59; the 700 hint stays the upper bound for 50 variants each | `fCategory`, `gqlCategorised.single` | Import with an empty Category column for products that have a type, a standard category or a collection, or every import failing with a schema error. Check one product with a type, one with only a standard category, one with only collections, one with nothing; and that a product in two collections imports the first only. |
 | *Verified 2026-10-24 (read-only).* `ProductVariant.compareAtPrice` is a decimal string or null | `fCompareAt` | The compare-at price missing on an item that has one in Shopify. |
 | `productUpdate(product: ProductUpdateInput!)` with `{id, productType}`; its `userErrors` are `UserError` (`field`, `message`, no `code`). **Schema-verified by introspection only; no mutation has been run** | `mProductType`, `kProductType`, `keyType` | Change the category of an imported item in Universal Till and wait for the sweep: failing looks like `rejected_by_channel` with a logged `outbox.graphql_error`, or the product type not changing, or a collection changed (it must never be). Needs `write_products`, which the app holds. Run this on the dev store before a real shop's first category fill. |
+| `Refund.totalRefundedSet { shopMoney { amount currencyCode } }` (a `MoneyBag`) on `refundCreate`'s `refund` is the money that refund moved; `Order.totalRefundedSet` is the order's refunded total (this one already verified on the orders read) | `fTotalRefunded`, `mRefundCreate`, `qRefundState` | Do a refund of one unit on a dev-store order: failing looks like a GraphQL schema error on every `refund.create` (`rejected_by_channel` with a logged `outbox.graphql_error`), or the op acked WITHOUT `refunded_amount_minor` and a `refund.amount_unread` log (answer missing or in another currency). Also refund 5.00 in the admin after queueing an op with `refunded_before_minor` 0 and check a refund above `max_amount_minor - 5.00` is refused `refund_exceeds_ceiling`. With a gateway whose refund stays pending, check what `refund.totalRefundedSet` reads (0 is acked as 0; the next op's cap re-reads the order total, so this is safe, but note it). |
 | `discountAllocations { allocatedAmountSet }` on a line is the COMPLETE list of discounts (the line's own and its share of an order-level code) | `fLineAllocations` | `order.refused.total_mismatch` or `bad_line` for an order with a discount code. Check one order with a line discount and one with a code. |
 | `totalTaxSet` is the order's tax and, with prices excluding tax, `totalPriceSet` = lines after discount + shipping + `totalTaxSet` | `fOrderTax`, `mapOrder` | `order.refused.total_mismatch` on every tax-excluded order (a cent off from rounding, or duties/tips in the total). |
 | `shippingLines(first:)` `discountedPriceSet` (ex tax) lists every shipping line | `fShippingLines` | `order.refused.total_mismatch` on an order with two shipping lines; `mixed_shipping_tax` when their rates differ. |

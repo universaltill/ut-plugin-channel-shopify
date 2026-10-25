@@ -62,6 +62,7 @@ const (
 	MOrderCancel     = mOrderCancel
 	MCancelJob       = mCancelJob
 	MRefundCreate    = mRefundCreate
+	FTotalRefunded   = fTotalRefunded
 	FSuggestedRefund = fSuggestedRefund
 	FOrderRefunds    = fOrderRefunds
 )

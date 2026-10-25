@@ -40,6 +40,24 @@ func (s *Shop) LoseAnswer(operation string, n int) {
 	s.lose[operation] = n
 }
 
+// PartialAnswer makes the next mutation of the named operation take effect and
+// then answer with its data AND a GraphQL error (code): a field of the
+// selection failed to resolve after the write was made.
+func (s *Shop) PartialAnswer(operation, code string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.partial[operation] = code
+}
+
+// FailGraphQL makes the next request of the named operation answer with a
+// GraphQL error (code) and no data, performing nothing (a document Shopify
+// refused before executing it).
+func (s *Shop) FailGraphQL(operation, code string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failGQL[operation] = code
+}
+
 // RefuseCancel makes orderCancel of this order come back with a user error.
 func (s *Shop) RefuseCancel(orderID string) {
 	s.mu.Lock()
@@ -56,6 +74,17 @@ func (s *Shop) SuggestExtra(n int64) {
 	s.suggestExtra = n
 }
 
+// TaxRemainderOnLastUnits models Shopify putting the whole tax-rounding
+// remainder (n minor units) on the LAST refunded units of the order's last
+// line: a suggested refund that takes that line to its full quantity asks for n
+// more than the proportional share the cloud's ceiling is built from. A refund
+// that stops short of the last units is not affected.
+func (s *Shop) TaxRemainderOnLastUnits(n int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastUnitsRem = n
+}
+
 // Cancel returns what orderCancel carried for the order (ok false when it was
 // never cancelled through the API).
 func (s *Shop) Cancel(orderID string) (CancelRecord, bool) {
@@ -70,6 +99,35 @@ func (s *Shop) Refunds(orderID string) []RefundRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]RefundRecord(nil), s.refunds[orderID]...)
+}
+
+// OddOrderRefunded makes the order's totalRefundedSet in the RefundState read
+// come back as v (a malformed or foreign-currency money bag, or nil).
+func (s *Shop) OddOrderRefunded(v any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.oddOrderRefunded, s.hasOddOrder = v, true
+}
+
+// OddRefundAnswer makes the created refund's totalRefundedSet come back as v.
+func (s *Shop) OddRefundAnswer(v any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.oddRefundAnswer, s.hasOddAnswer = v, true
+}
+
+// AdminRefund is money the merchant refunded in Shopify's admin outside any
+// line (a goodwill refund): the order's refunded total grows by amount (minor
+// units) and so less is left to refund. totalRefundedSet shows it.
+func (s *Shop) AdminRefund(orderID string, amount int64) {
+	s.MutateOrder(orderID, func(o *Order) {
+		o.RefundTotal += amount
+		if o.RefundTotal >= o.Total {
+			o.Fin = "REFUNDED"
+		} else if o.RefundTotal > 0 {
+			o.Fin = "PARTIALLY_REFUNDED"
+		}
+	})
 }
 
 // RefundTotal is the money refunded on the order, minor units.
@@ -189,8 +247,12 @@ func (s *Shop) opRefundState(req gqlRequest) (any, string) {
 	if o.CancelledAt != "" {
 		cancelled = o.CancelledAt
 	}
+	var refundedSet any = ms(o.RefundTotal, s.opt.Currency)
+	if s.hasOddOrder {
+		refundedSet = s.oddOrderRefunded
+	}
 	return obj{"order": obj{"cancelledAt": cancelled, "currencyCode": s.opt.Currency, "displayFulfillmentStatus": o.Ful,
-		"refunds": refunds, "fulfillmentOrders": obj{"nodes": fos}}}, ""
+		"totalRefundedSet": refundedSet, "refunds": refunds, "fulfillmentOrders": obj{"nodes": fos}}}, ""
 }
 
 type refundItem struct {
@@ -244,6 +306,19 @@ func (s *Shop) opSuggestedRefund(req gqlRequest) (any, string) {
 		amount = left
 	}
 	amount += s.suggestExtra
+	if s.lastUnitsRem != 0 && len(o.Lines) > 0 {
+		last := o.Lines[len(o.Lines)-1]
+		got := refundedUnits(o)[last.ID]
+		for _, it := range items {
+			if it.LineItemID == last.ID {
+				got += it.Quantity
+			}
+		}
+		if got == last.Qty {
+			amount += s.lastUnitsRem
+			value += s.lastUnitsRem
+		}
+	}
 	var txns []obj
 	if amount > 0 {
 		m := ms(amount, cur)
@@ -338,7 +413,11 @@ func (s *Shop) opRefundCreate(req gqlRequest) (any, string) {
 	o.UpdatedAt = s.bump()
 	s.refunds[o.ID] = append(s.refunds[o.ID], rec)
 	s.acts["refund:"+o.ID]++
-	out := obj{"refundCreate": obj{"refund": obj{"id": gid("Refund", 9200+len(s.refunds[o.ID]))}, "userErrors": []obj{}}}
+	var answered any = ms(paid, s.opt.Currency)
+	if s.hasOddAnswer {
+		answered = s.oddRefundAnswer
+	}
+	out := obj{"refundCreate": obj{"refund": obj{"id": gid("Refund", 9200+len(s.refunds[o.ID])), "totalRefundedSet": answered}, "userErrors": []obj{}}}
 	b, _ := json.Marshal(out)
 	s.idem["refund:"+key] = string(b)
 	return out, ""
