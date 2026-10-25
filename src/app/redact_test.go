@@ -70,6 +70,11 @@ func TestCustomerRedactWithoutOrdersOrCustomer(t *testing.T) {
 	if err != nil || len(got.ResourceIDs) != 0 || len(got.OrderIDs) != 1 {
 		t.Errorf("no customer: %+v %v", got, err)
 	}
+	// a null customer id is no id, not a refusal that would 503 the redact
+	got, err = askRedact(e, "customers/redact", `{"customer":{"id":null},"orders_to_redact":[11]}`)
+	if err != nil || len(got.ResourceIDs) != 0 || len(got.OrderIDs) != 1 {
+		t.Errorf("null customer id: %+v %v", got, err)
+	}
 }
 
 func TestCustomerRedactRefusesBadIDs(t *testing.T) {

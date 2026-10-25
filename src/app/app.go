@@ -157,7 +157,7 @@ func redactIDs(body []byte) (customer string, orders []string, err error) {
 	if json.Unmarshal(body, &b) != nil {
 		return "", nil, bad
 	}
-	if b.Customer != nil && b.Customer.ID != nil {
+	if b.Customer != nil && b.Customer.ID != nil && string(b.Customer.ID) != "null" {
 		gid := "gid://shopify/Customer/" + string(b.Customer.ID)
 		if !numericIDRe.Match(b.Customer.ID) || !okGID(tCustomer, gid) {
 			return "", nil, bad
