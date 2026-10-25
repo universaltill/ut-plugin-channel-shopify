@@ -87,9 +87,9 @@ connection's verified account and adds the access token.
   `invalid_price`; a variant that no longer exists is `not_found`). The item's
   category fills the product's `productType` (the leaf of `category_path`, cut
   to 60 characters) ONLY when the product has no category at all in Shopify (no
-  type, no standard category, no collection): the cloud sends the category on
-  every upsert, so overwriting would undo the merchant's own change at the next
-  price edit. Never a collection, never the standard category, never an
+  type, no standard category, no collection): the cloud sends the category
+  whenever it differs from the link baseline, which a price push does not move,
+  so overwriting would undo the merchant's own change at the next price edit. Never a collection, never the standard category, never an
   overwrite; an empty path writes nothing. A refused type write is logged
   (`listing.category_rejected`) and does not fail the price push. Sibling
   variants share the product's type (the first push fills it). Changing the
@@ -97,6 +97,17 @@ connection's verified account and adds the access token.
   category only when it changed (proposal on ut-docs#4942). Title,
   description, status, sku, barcodes, compare-at and image are ignored (acknowledged as success;
   `listing.fields_ignored` is logged once per ask, for successes only).
+  The manifest declares `push_fields: ["price"]` (0.4.1, ut-docs#5014), so the
+  cloud hashes a listing only over its price (and `active`): a rename, a
+  description, SKU, barcode, compare-at or category change no longer queues a
+  no-op upsert after each re-read. The category is not declared because its
+  write is fill-only: declaring it would re-queue every item whose Shopify
+  category differs from Universal Till's. A category set in Universal Till on a
+  product that has none in Shopify is therefore filled at the item's next price
+  push, not on its own, and never reaches a product that already has a
+  category in Shopify. Pushes do not move the link's category baseline; the
+  next re-read does. The first sweep after this release re-hashes every
+  listing once and may queue one upsert per published listing.
   `listing.unpublish` is not done (`unsupported_op`, no mutation). Only the
   rows of "Verify first on the dev store" marked verified have run against a real store.
 - **Known limits**: an item the owner published from Universal Till (no
@@ -234,6 +245,7 @@ and a test keeps them there. First run on the development store, in this order:
 | Lines of a `PARTIALLY_FULFILLED` order cannot be restocked by this adapter | `refundItems` | Staff must refund without restock, or mark the operation done after doing it in the admin. |
 | A refund the cloud queued while the shop had refunded some units itself is refunded for the difference only. **Accepted race:** read, then `suggestedRefund`, then `refundCreate` are separate round trips with no compare-and-set; Shopify caps a refund at the refundable maximum, so the worst case is bounded | `owed` | Over-refund: one more unit refunded than staff intended when staff refund the same line in the admin within the same few seconds. Compare the refund in Shopify with `refunded_to` in the op. |
 | The cloud's ceiling (floor of the discount share, ceiling of the tax) and Shopify's proportional refund agree to the minor unit | `refundTransactions` | A spurious `refund_exceeds_ceiling` dead letter (fail closed, no money moves) on an odd-priced 3-unit line with a discount code. Try exactly that on the dev store; if it happens the cloud ceiling needs a one-unit allowance per line. |
+| `push_fields: ["price"]` stops renames re-queuing upserts (ut-docs#5014; needs ut-cloud with ut-docs#4911 deployed) | `manifest.json` `channel.push_fields` | Rename a published item in Universal Till, run the sweep and a re-read, then the sweep again: an upsert is queued again (failing), or a price change no longer queues exactly one. Then set a category in Universal Till on an item whose Shopify product has none, change its price and sweep: `productType` is filled, and the next re-read plus sweep queues nothing. Expect one upsert per published listing on the first sweep after the release (re-hash), then none. |
 | The requested costs (`Cost:` per query) | `queries.go` | Shopify's `extensions.cost.requestedQueryCost` is above the hand count: raise the hint. |
 
 ## Layout

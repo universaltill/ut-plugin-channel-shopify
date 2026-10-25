@@ -55,6 +55,11 @@ cap = c.get("capabilities") or {}
 # The adapter pushes the price of an EXISTING product only: it ignores other fields (listing.fields_ignored) and refuses a
 # create with create_not_supported (ut-docs#4774 adds creation). Pinned in src/app TestCreateUpsertIsRefused*.
 if cap.get("items") != "both": errs.append("capabilities.items must be 'both': the cloud queues price edits only for push/both (the adapter refuses creates, ignores other fields)")
+# push_fields MUST be exactly ["price"] (ut-docs#5014): the cloud hashes a listing only over these fields, and the
+# adapter pushes only the variant price. The productType write is fill-only (a product with no category in Shopify),
+# so declaring category_path would re-queue an upsert after every re-read for each item whose Shopify category differs
+# from Universal Till's, which the adapter by design never overwrites. compare_at is never pushed (ut-docs#4774).
+if c.get("push_fields") != ["price"]: errs.append('channel.push_fields must be ["price"]: the adapter pushes only the variant price (category is fill-only), so any other field re-queues no-op upserts')
 if cap.get("variants") not in ("pull", "both"): errs.append("capabilities.variants is 'pull' or 'both' (price push to existing variants only)")
 # The adapter does order.cancel and refund.create (ut-docs#4774): without push the cloud never queues them.
 for k in ("fulfilment", "cancel", "refunds"):

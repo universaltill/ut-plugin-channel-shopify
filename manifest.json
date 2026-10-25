@@ -1,7 +1,7 @@
 {
   "id": "com.universaltill.channel-shopify",
   "name": "Shopify",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Connects a Shopify store to Universal Till: imports its products and variants, sends price and stock changes to the store, brings its orders into Universal Till and reports shipments with tracking back to Shopify, cancels orders and refunds order lines there when you do so in Universal Till. Nothing in the store is ever deleted. It runs only in the Universal Till cloud.",
   "author": "Universal Till",
   "website": "https://universaltill.com",
@@ -33,6 +33,7 @@
       "items": "both", "variants": "both", "stock": "both", "orders": "pull", "fulfilment": "push", "cancel": "push", "refunds": "push"
     },
     "limits": {"max_options": 3, "max_variants": 100},
+    "push_fields": ["price"],
     "webhooks": {
       "topics": ["orders/create", "orders/updated", "app/uninstalled", "customers/redact", "shop/redact", "customers/data_request"],
       "verify": {"header": "X-Shopify-Hmac-Sha256", "alg": "hmac-sha256", "encoding": "base64"}
