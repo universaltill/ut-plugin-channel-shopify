@@ -181,20 +181,27 @@ type Shop struct {
 	schemaErr    map[string]bool   // operations answered with a schema error
 	codes        map[string]bool
 	tracking     map[string][3]string
-	lose         map[string]int  // operation -> answers still to lose AFTER performing it
-	noCancel     map[string]bool // orders whose orderCancel comes back with a user error
+	lose         map[string]int    // operation -> answers still to lose AFTER performing it
+	partial      map[string]string // operation -> field error code its next answer carries beside the data
+	failGQL      map[string]string // operation -> GraphQL error code its next request gets, nothing performed
+	noCancel     map[string]bool   // orders whose orderCancel comes back with a user error
 	cancels      map[string]CancelRecord
 	refunds      map[string][]RefundRecord
 	suggestExtra int64
+	lastUnitsRem int64
 	txnCurrency  string
-	cancelPolls  int  // job queries until the next cancel job is done (0: done at once)
-	oddJob       *obj // the next cancel is accepted with this job in the answer (nil job: no job) and not carried out
-	oddJobSet    bool
-	refuseType   bool // productUpdate answers a userError
-	failJob      bool // the next cancel job ends done without cancelling
-	jobs         map[string]*cancelJob
-	pending      map[string]string // order id -> job id of a cancel still running
-	hooks        map[string]func() // operation -> run once, just before the next such mutation
+	// oddOrderRefunded / oddRefundAnswer replace totalRefundedSet in the
+	// RefundState read / the created refund (nil = as computed).
+	oddOrderRefunded, oddRefundAnswer any
+	hasOddOrder, hasOddAnswer         bool
+	cancelPolls                       int  // job queries until the next cancel job is done (0: done at once)
+	oddJob                            *obj // the next cancel is accepted with this job in the answer (nil job: no job) and not carried out
+	oddJobSet                         bool
+	refuseType                        bool // productUpdate answers a userError
+	failJob                           bool // the next cancel job ends done without cancelling
+	jobs                              map[string]*cancelJob
+	pending                           map[string]string // order id -> job id of a cancel still running
+	hooks                             map[string]func() // operation -> run once, just before the next such mutation
 }
 
 // New returns a seeded shop.
@@ -221,7 +228,7 @@ func New(o Options) *Shop {
 		o.Currency = "GBP"
 	}
 	s := &Shop{opt: o, levels: map[string]*level{}, idem: map[string]string{}, keyfp: map[string]string{}, acts: map[string]int{}, codes: map[string]bool{}, tracking: map[string][3]string{},
-		lose: map[string]int{}, noCancel: map[string]bool{}, cancels: map[string]CancelRecord{}, refunds: map[string][]RefundRecord{},
+		lose: map[string]int{}, partial: map[string]string{}, failGQL: map[string]string{}, noCancel: map[string]bool{}, cancels: map[string]CancelRecord{}, refunds: map[string][]RefundRecord{},
 		jobs: map[string]*cancelJob{}, pending: map[string]string{}, hooks: map[string]func(){}}
 	for i := 0; i < o.Locations; i++ {
 		s.locations = append(s.locations, gid("Location", 7001+i))
@@ -881,12 +888,26 @@ func (s *Shop) graphql(w http.ResponseWriter, r *http.Request) {
 	if isMut {
 		s.writes++
 	}
-	data, gerr := s.dispatch(req)
+	var data any
+	gerr := s.failGQL[req.OperationName]
+	delete(s.failGQL, req.OperationName)
+	if gerr == "" {
+		data, gerr = s.dispatch(req)
+	}
 	lost := isMut && gerr == "" && s.lose[req.OperationName] > 0
 	if lost {
 		s.lose[req.OperationName]--
 	}
+	partial := ""
+	if isMut && gerr == "" && !lost {
+		partial = s.partial[req.OperationName]
+		delete(s.partial, req.OperationName)
+	}
 	s.mu.Unlock()
+	if partial != "" { // the effect happened; a field of the answer failed to resolve
+		writeJSON(w, 200, map[string]any{"data": data, "errors": []map[string]any{{"message": partial, "extensions": map[string]string{"code": partial}}}, "extensions": costExt(0, 0)})
+		return
+	}
 	if lost { // the effect happened; the answer never arrives
 		writeJSON(w, 502, map[string]string{"errors": "Bad gateway"})
 		return

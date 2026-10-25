@@ -193,15 +193,24 @@ type refundLinePayload struct {
 }
 
 type refundPayload struct {
-	Reason   string              `json:"reason"`
-	Currency string              `json:"currency"`
-	Max      *int64              `json:"max_amount_minor"`
-	Lines    []refundLinePayload `json:"lines"`
+	Reason   string `json:"reason"`
+	Currency string `json:"currency"`
+	Max      *int64 `json:"max_amount_minor"`
+	// RefundedBefore is the refund money the order had when the op was queued
+	// (the baseline of the cap). Absent on an op queued before the cloud sent
+	// it: the baseline is then 0, so everything the channel shows refunded
+	// counts against the cap. That is the conservative choice (it can only
+	// refuse a refund that was fine, never let one through that was not).
+	RefundedBefore *int64              `json:"refunded_before_minor"`
+	Lines          []refundLinePayload `json:"lines"`
 }
 
 func (p *refundPayload) valid() bool {
 	if _, ok := cancelReasons[p.Reason]; !ok || !curRe.MatchString(p.Currency) || p.Max == nil || *p.Max < 0 || *p.Max > maxMinorAmount ||
 		len(p.Lines) == 0 || len(p.Lines) > maxRefundPayloadLines {
+		return false
+	}
+	if p.RefundedBefore != nil && (*p.RefundedBefore < 0 || *p.RefundedBefore > maxMinorAmount) {
 		return false
 	}
 	seen := map[string]bool{}
@@ -217,11 +226,12 @@ func (p *refundPayload) valid() bool {
 
 type refundState struct {
 	Order *struct {
-		CancelledAt string      `json:"cancelledAt"`
-		Currency    string      `json:"currencyCode"`
-		Fulfilment  string      `json:"displayFulfillmentStatus"`
-		Refunds     []gqlRefund `json:"refunds"`
-		FOs         struct {
+		CancelledAt   string      `json:"cancelledAt"`
+		Currency      string      `json:"currencyCode"`
+		Fulfilment    string      `json:"displayFulfillmentStatus"`
+		TotalRefunded *gqlMoney   `json:"totalRefundedSet"`
+		Refunds       []gqlRefund `json:"refunds"`
+		FOs           struct {
 			Nodes []struct {
 				Status string `json:"status"`
 				Loc    *struct {
@@ -322,6 +332,14 @@ func refundCreate(op channel.OutboxOp) channel.Ack {
 	case st.Order.Currency != p.Currency:
 		return fail("currency_mismatch", false)
 	}
+	// The cap: the ceiling the cloud queued, less what was refunded in the
+	// admin since (read now, against the baseline the op carries). Read before
+	// any mutation; an unreadable figure refuses, it is never guessed.
+	now, ok := refundedNow(st.Order.TotalRefunded, p.Currency)
+	if !ok {
+		return fail("rejected_by_channel", false)
+	}
+	ceiling := p.cap(now)
 	items, code := refundItems(&st, owed, restocked)
 	if code != "" {
 		return fail(code, false)
@@ -340,7 +358,7 @@ func refundCreate(op channel.OutboxOp) channel.Ack {
 	if code != "" {
 		return fail(code, false)
 	}
-	if amount > *p.Max {
+	if amount > ceiling {
 		// Shopify's own figure is above the ceiling: refund NOTHING.
 		hostLog(channel.LevelWarn, "refund.above_ceiling", map[string]any{"lines": len(owed)})
 		return fail("refund_exceeds_ceiling", false)
@@ -354,19 +372,75 @@ func refundCreate(op channel.OutboxOp) channel.Ack {
 	// Shopify) and the host's signal that a re-send is safe. Exactly-once across
 	// attempts still rests on the read above.
 	if err := run(qRefundCreate, map[string]any{"input": input, "key": op.ID}, op.ID, &r); err != nil {
+		// A GraphQL error can come after the refund was made (a field of the
+		// answer failed to resolve): re-read, so money that moved is never
+		// dead-lettered. Nothing owed is success, without an amount.
+		var ge *gqlError
+		if errors.As(err, &ge) && p.settled(id) {
+			return channel.Ack{ExternalID: id}
+		}
 		return failFor(err)
 	}
 	if payloadErrors(r[rRefundCreate], fUserErrors) {
 		// Probably someone refunded it between the read and the write.
-		var again refundState
-		if err := run(qRefundState, map[string]any{"id": id}, "", &again); err == nil && again.Order != nil {
-			if rf, _, ok := again.done(); ok && len(p.owed(rf)) == 0 {
-				return channel.Ack{ExternalID: id}
-			}
+		if p.settled(id) {
+			return channel.Ack{ExternalID: id}
 		}
 		return fail("rejected_by_channel", false)
 	}
-	return channel.Ack{ExternalID: id}
+	// Ack the money the refund moved, read back from Shopify's answer. If it
+	// cannot be read the refund still succeeded: ack without the amount, so the
+	// cloud counts the ceiling (conservative).
+	ack := channel.Ack{ExternalID: id}
+	if moved, ok := refundMoved(r[rRefundCreate], p.Currency); ok {
+		ack.RefundedAmountMinor = &moved
+	} else {
+		hostLog(channel.LevelWarn, "refund.amount_unread", map[string]any{"lines": len(owed)})
+	}
+	return ack
+}
+
+// settled re-reads the order and reports whether nothing is owed any more.
+func (p *refundPayload) settled(id string) bool {
+	var again refundState
+	if err := run(qRefundState, map[string]any{"id": id}, "", &again); err != nil || again.Order == nil {
+		return false
+	}
+	rf, _, ok := again.done()
+	return ok && len(p.owed(rf)) == 0
+}
+
+// cap is the most this refund may move: the queued ceiling less the money
+// refunded since queueing, never below 0 (contract section 8.4).
+func (p *refundPayload) cap(refundedNow int64) int64 {
+	var before int64
+	if p.RefundedBefore != nil {
+		before = *p.RefundedBefore
+	}
+	return max(0, *p.Max-max(0, refundedNow-before))
+}
+
+// refundedNow reads the order's totalRefundedSet in the payload's currency.
+func refundedNow(m *gqlMoney, cur string) (int64, bool) {
+	if m == nil || m.ShopMoney.Currency != cur {
+		return 0, false
+	}
+	n, ok := parseMoney(m.ShopMoney.Amount, cur)
+	return n, ok && n <= maxMinorAmount
+}
+
+// refundMoved reads refundCreate's refund.totalRefundedSet: valid money in the
+// payload's currency, 0..maxMinorAmount (inside the host's 2^50 bound).
+func refundMoved(root json.RawMessage, cur string) (int64, bool) {
+	var a struct {
+		Refund *struct {
+			Total *gqlMoney `json:"totalRefundedSet"`
+		} `json:"refund"`
+	}
+	if json.Unmarshal(root, &a) != nil || a.Refund == nil {
+		return 0, false
+	}
+	return refundedNow(a.Refund.Total, cur)
 }
 
 // refundItems builds the refund line items. A line is restocked only when the

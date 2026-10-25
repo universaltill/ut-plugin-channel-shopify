@@ -68,6 +68,10 @@ const (
 	rRefundCreate = `refundCreate`
 	rSuggested    = `suggestedRefund`
 	rJob          = `job`
+	// totalRefundedSet: the money refunded so far on an Order (verified on the
+	// orders read) and, written from memory, the money one Refund moved
+	// (Refund.totalRefundedSet, README row "Refund.totalRefundedSet").
+	fTotalRefunded = `totalRefundedSet { shopMoney { amount currencyCode } }`
 	// orderCancel is an asynchronous job in Shopify: the answer says the job
 	// was accepted. refund:true gives the buyer the money back (the cloud's
 	// confirmation marks every unit refunded); notifyCustomer stays false; the
@@ -92,7 +96,9 @@ const (
 	mVariantLookup = `productVariant(id: $id) { id product { id ` + fCategory + ` } price }`
 	// refundCreate takes the op id as Shopify's own idempotency key too
 	// (ADR-0169 section 3: mandatory on refund mutations).
-	mRefundCreate = rRefundCreate + `(input: $input) ` + dIdempotent + ` { refund { id } userErrors { field } }`
+	// refund { totalRefundedSet } (Refund.totalRefundedSet, a MoneyBag) is what
+	// the refund moved: the adapter acks it as refunded_amount_minor (R1).
+	mRefundCreate = rRefundCreate + `(input: $input) ` + dIdempotent + ` { refund { id ` + fTotalRefunded + ` } userErrors { field } }`
 	// What Shopify would refund for these lines: the amount (tax, discounts and
 	// rounding are Shopify's) and the transactions it proposes.
 	fSuggestedRefund = rSuggested + `(refundLineItems: $items) { amountSet { shopMoney { amount currencyCode } } ` +
@@ -146,7 +152,7 @@ const lineFields = `id name sku quantity currentQuantity variant { id } ` +
 const orderFields = `id name createdAt updatedAt cancelledAt currencyCode taxesIncluded ` +
 	`displayFinancialStatus displayFulfillmentStatus ` +
 	`totalPriceSet { shopMoney { amount currencyCode } } ` +
-	`totalRefundedSet { shopMoney { amount currencyCode } } ` +
+	fTotalRefunded + ` ` +
 	fOrderTax + ` ` + fShippingLines + ` ` +
 	fOrderRefunds + ` ` +
 	`lineItems(first: $lfirst) { ` + pageInfo + ` nodes { ` + lineFields + ` } }`
@@ -218,7 +224,7 @@ var (
 	// currency, how fulfilled and where (for a return), and what is already
 	// refunded per line.
 	qRefundState = queryDef{Name: "RefundState", Cost: 150, Text: `query RefundState($id: ID!) { order(id: $id) { ` +
-		`cancelledAt currencyCode displayFulfillmentStatus ` + fOrderRefunds + ` fulfillmentOrders(first: 10) { nodes { id status ` + fFOLocation + ` } } } }`}
+		`cancelledAt currencyCode displayFulfillmentStatus ` + fTotalRefunded + ` ` + fOrderRefunds + ` fulfillmentOrders(first: 10) { nodes { id status ` + fFOLocation + ` } } } }`}
 
 	qSuggestedRefund = queryDef{Name: "SuggestedRefund", Cost: 40, Text: `query SuggestedRefund($id: ID!, $items: [RefundLineItemInput!]!) { order(id: $id) { ` +
 		fSuggestedRefund + ` } }`}

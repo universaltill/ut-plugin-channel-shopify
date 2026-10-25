@@ -652,3 +652,188 @@ func TestCancelAcceptedWithNoJobOrAnUnusableJobIdIsPendingAndPollsNothingHostile
 		t.Fatal("an id that is not a Shopify Job id was sent to the shop")
 	}
 }
+
+// --- refund cap and amount ack (ut-docs#4936, contract section 8.4/8.5) -------
+//
+// cap = max_amount_minor - max(0, refunded_now - refunded_before_minor), floor 0.
+// The payload is frozen at queue time; money refunded in the admin since then
+// lowers the cap. A refund that moves money acks refunded_amount_minor.
+
+// withBefore adds refunded_before_minor to a refundJSON payload.
+func withBefore(p string, before int64) string {
+	return strings.Replace(p, `"max_amount_minor":`, fmt.Sprintf(`"refunded_before_minor":%d,"max_amount_minor":`, before), 1)
+}
+
+// capEnv is order o1 with two added lines, so there is room to refund: a big
+// one (9000) that is never refunded and one of unit price `unit` that is.
+func capEnv(t *testing.T, unit int64, opt fakeshop.Options) (*env, string) {
+	e := newEnv(t, opt)
+	e.shop.AddOrderLine(o1, 1, 9000)
+	return e, e.shop.AddOrderLine(o1, 1, unit)
+}
+
+func refundLine1(line string) [4]any { return [4]any{line, 1, 1, 0} }
+
+func TestRefundCapIsLoweredByMoneyRefundedInTheAdminSinceQueueing(t *testing.T) {
+	// max 5000, 2000 refunded when queued, 3000 now: 1000 went out meanwhile, cap 4000.
+	e, line := capEnv(t, 4500, fakeshop.Options{})
+	e.shop.AdminRefund(o1, 3000)
+	p := withBefore(refundJSON(o1, "GBP", 5000, refundLine1(line)), 2000)
+	wantAck(t, e.outbox(refundOp("r-1", o1, p))["r-1"], "refund_exceeds_ceiling", false)
+	if e.count("RefundCreate") != 0 || e.shop.RefundTotal(o1) != 3000 {
+		t.Fatalf("sent: mutations %d refunded %d", e.count("RefundCreate"), e.shop.RefundTotal(o1))
+	}
+	if n, _ := countLogs(e, "refund.above_ceiling"); n != 1 {
+		t.Errorf("refund.above_ceiling logged %d times", n)
+	}
+	// Shopify suggests exactly the cap: refunded, and the amount is acked.
+	e2, line2 := capEnv(t, 4000, fakeshop.Options{})
+	e2.shop.AdminRefund(o1, 3000)
+	a := e2.outbox(refundOp("r-2", o1, withBefore(refundJSON(o1, "GBP", 5000, refundLine1(line2)), 2000)))["r-2"]
+	if a.Error != nil || a.RefundedAmountMinor == nil || *a.RefundedAmountMinor != 4000 {
+		t.Fatalf("at the cap: %+v", a)
+	}
+}
+
+func TestRefundCapIsNotRaisedWhenLessIsRefundedNowThanWhenQueued(t *testing.T) {
+	// now 500 < before 2000: no adjustment, the cap stays at max.
+	e, line := capEnv(t, 4500, fakeshop.Options{})
+	e.shop.AdminRefund(o1, 500)
+	a := e.outbox(refundOp("r", o1, withBefore(refundJSON(o1, "GBP", 4500, refundLine1(line)), 2000)))["r"]
+	if a.Error != nil || a.RefundedAmountMinor == nil || *a.RefundedAmountMinor != 4500 {
+		t.Fatalf("ack %+v", a)
+	}
+	e2, line2 := capEnv(t, 4501, fakeshop.Options{})
+	e2.shop.AdminRefund(o1, 500)
+	wantAck(t, e2.outbox(refundOp("r", o1, withBefore(refundJSON(o1, "GBP", 4500, refundLine1(line2)), 2000)))["r"], "refund_exceeds_ceiling", false)
+}
+
+func TestRefundCapFloorsAtZero(t *testing.T) {
+	// 2000 went out since queueing against a max of 1000: the cap is 0, not -1000.
+	e, line := capEnv(t, 1, fakeshop.Options{})
+	e.shop.AdminRefund(o1, 2000)
+	wantAck(t, e.outbox(refundOp("r", o1, withBefore(refundJSON(o1, "GBP", 1000, refundLine1(line)), 0)))["r"], "refund_exceeds_ceiling", false)
+	if e.count("RefundCreate") != 0 {
+		t.Fatal("sent")
+	}
+}
+
+func TestRefundWithoutRefundedBeforeCountsEverythingRefundedAsSinceQueueing(t *testing.T) {
+	// A legacy op (no refunded_before_minor): baseline 0, the conservative choice.
+	e, line := capEnv(t, 2500, fakeshop.Options{})
+	e.shop.AdminRefund(o1, 3000)
+	wantAck(t, e.outbox(refundOp("r-1", o1, refundJSON(o1, "GBP", 5000, refundLine1(line))))["r-1"], "refund_exceeds_ceiling", false) // cap 2000
+	e2, line2 := capEnv(t, 2000, fakeshop.Options{})
+	e2.shop.AdminRefund(o1, 3000)
+	if a := e2.outbox(refundOp("r-2", o1, refundJSON(o1, "GBP", 5000, refundLine1(line2))))["r-2"]; a.Error != nil {
+		t.Fatalf("ack %+v", a)
+	}
+}
+
+func TestRefundedBeforeOutOfRangeIsAnInvalidPayloadAndNothingIsSent(t *testing.T) {
+	e := newEnv(t, fakeshop.Options{})
+	for i, before := range []int64{-1, 1_000_000_000_000} {
+		id := fmt.Sprintf("r-%d", i)
+		wantAck(t, e.outbox(refundOp(id, o3, withBefore(refundJSON(o3, "GBP", 1620, [4]any{l3, 2, 2, 2}), before)))[id], "invalid_payload", false)
+	}
+	if len(e.shop.Requests()) != 0 {
+		t.Fatalf("%d requests for an invalid payload", len(e.shop.Requests()))
+	}
+}
+
+func TestRefundWithAnUnreadableOrForeignRefundedTotalIsRejectedBeforeAnyMutation(t *testing.T) {
+	for name, odd := range map[string]any{
+		"missing":  nil,
+		"garbled":  map[string]any{"shopMoney": map[string]any{"amount": "lots", "currencyCode": "GBP"}},
+		"currency": map[string]any{"shopMoney": map[string]any{"amount": "0.00", "currencyCode": "EUR"}},
+	} {
+		e := newEnv(t, fakeshop.Options{})
+		e.shop.OddOrderRefunded(odd)
+		wantAck(t, e.outbox(refundOp("r", o3, withBefore(refundJSON(o3, "GBP", 1620, [4]any{l3, 2, 2, 2}), 0)))["r"], "rejected_by_channel", false)
+		if e.count("RefundCreate") != 0 || e.count("SuggestedRefund") != 0 {
+			t.Errorf("%s: went on to ask or send", name)
+		}
+	}
+}
+
+func TestRefundAcksTheMoneyTheRefundMovedAndNothingMoreWhenItIsUnknown(t *testing.T) {
+	e := newEnv(t, fakeshop.Options{})
+	a := e.outbox(refundOp("r-1", o3, refundJSON(o3, "GBP", 1620, [4]any{l3, 2, 2, 2})))["r-1"]
+	if a.Error != nil || a.RefundedAmountMinor == nil || *a.RefundedAmountMinor != e.shop.RefundTotal(o3) || *a.RefundedAmountMinor != 1620 {
+		t.Fatalf("ack %+v, shop refunded %d", a, e.shop.RefundTotal(o3))
+	}
+	// Redelivery: already refunded, we do not know what moved: no amount (the ceiling counts).
+	if a := e.outbox(refundOp("r-1", o3, refundJSON(o3, "GBP", 1620, [4]any{l3, 2, 2, 2})))["r-1"]; a.Error != nil || a.RefundedAmountMinor != nil {
+		t.Fatalf("already refunded acked %+v", a)
+	}
+	// Refunded in the admin between our read and our write: user error, re-read, success without an amount.
+	e2 := newEnv(t, fakeshop.Options{})
+	e2.shop.BeforeMutation("RefundCreate", func() { e2.shop.RefundLine(o3, 0, 2, "NO_RESTOCK") })
+	if a := e2.outbox(refundOp("r", o3, refundJSON(o3, "GBP", 1620, [4]any{l3, 2, 2, 0})))["r"]; a.Error != nil || a.RefundedAmountMinor != nil {
+		t.Fatalf("race acked %+v", a)
+	}
+}
+
+func TestRefundWhoseAnswerHasNoReadableAmountIsAckedWithoutOneAndLogged(t *testing.T) {
+	for name, odd := range map[string]any{
+		"missing":  nil,
+		"garbled":  map[string]any{"shopMoney": map[string]any{"amount": "-5", "currencyCode": "GBP"}},
+		"currency": map[string]any{"shopMoney": map[string]any{"amount": "16.20", "currencyCode": "EUR"}},
+		"huge":     map[string]any{"shopMoney": map[string]any{"amount": "99999999999999.00", "currencyCode": "GBP"}},
+	} {
+		e := newEnv(t, fakeshop.Options{})
+		e.shop.OddRefundAnswer(odd)
+		a := e.outbox(refundOp("r", o3, refundJSON(o3, "GBP", 1620, [4]any{l3, 2, 2, 2})))["r"]
+		if a.Error != nil || a.ExternalID != o3 || a.RefundedAmountMinor != nil {
+			t.Errorf("%s: ack %+v", name, a)
+		}
+		if n, f := countLogs(e, "refund.amount_unread"); n != 1 || strings.Contains(fmt.Sprint(f), "gid://") {
+			t.Errorf("%s: refund.amount_unread logged %d times (%v)", name, n, f)
+		}
+	}
+}
+
+// Shopify puts the tax-rounding remainder entirely on the last refunded units,
+// so its suggestion is one minor unit above the cloud's rounded-up ceiling
+// (R7): refused, nothing sent. A refund that stops short of those units is fine.
+func TestRefundWithTheTaxRemainderOnTheLastUnitsIsOneAboveTheCeilingAndRefused(t *testing.T) {
+	e := newEnv(t, fakeshop.Options{})
+	e.shop.TaxRemainderOnLastUnits(1)
+	wantAck(t, e.outbox(refundOp("r-1", o3, refundJSON(o3, "GBP", 2430, [4]any{l3, 3, 3, 0})))["r-1"], "refund_exceeds_ceiling", false)
+	if e.count("RefundCreate") != 0 || e.shop.RefundTotal(o3) != 0 {
+		t.Fatal("money moved on a one-unit overshoot")
+	}
+	if a := e.outbox(refundOp("r-2", o3, refundJSON(o3, "GBP", 1620, [4]any{l3, 2, 2, 0})))["r-2"]; a.Error != nil || e.shop.RefundTotal(o3) != 1620 {
+		t.Fatalf("short of the last units: %+v refunded %d", a, e.shop.RefundTotal(o3))
+	}
+}
+
+func TestRefundOfNothingIsAllowedAtACapFlooredAtZero(t *testing.T) {
+	// A zero-value unit (Shopify suggests 0) with 2000 refunded since queueing
+	// against a max of 1000: the cap is 0, not -1000, so moving 0 is within it.
+	e, line := capEnv(t, 0, fakeshop.Options{})
+	e.shop.AdminRefund(o1, 2000)
+	a := e.outbox(refundOp("r", o1, withBefore(refundJSON(o1, "GBP", 1000, refundLine1(line)), 0)))["r"]
+	if a.Error != nil || e.count("RefundCreate") != 1 {
+		t.Fatalf("ack %+v, mutations %d", a, e.count("RefundCreate"))
+	}
+}
+
+func TestRefundThatTookEffectButAnsweredWithAFieldErrorIsAckedWithoutAnAmount(t *testing.T) {
+	// The refund was made, then a field of the answer failed to resolve: the
+	// re-read shows nothing owed, so it is success (no amount: the ceiling counts),
+	// never a dead letter for money that moved.
+	e := newEnv(t, fakeshop.Options{})
+	e.shop.PartialAnswer("RefundCreate", "INTERNAL_SERVER_ERROR")
+	a := e.outbox(refundOp("r", o3, refundJSON(o3, "GBP", 1620, [4]any{l3, 2, 2, 2})))["r"]
+	if a.Error != nil || a.RefundedAmountMinor != nil || e.shop.RefundTotal(o3) != 1620 {
+		t.Fatalf("ack %+v, shop refunded %d", a, e.shop.RefundTotal(o3))
+	}
+	// A GraphQL error with nothing done (the re-read still shows it owed) stays a failure.
+	e2 := newEnv(t, fakeshop.Options{})
+	e2.shop.FailGraphQL("RefundCreate", "BAD_REQUEST")
+	a = e2.outbox(refundOp("r", o3, refundJSON(o3, "GBP", 1620, [4]any{l3, 2, 2, 2})))["r"]
+	if a.Error == nil || e2.shop.RefundTotal(o3) != 0 {
+		t.Fatalf("ack %+v, shop refunded %d", a, e2.shop.RefundTotal(o3))
+	}
+}
