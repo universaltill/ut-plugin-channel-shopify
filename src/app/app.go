@@ -99,7 +99,9 @@ func header(h map[string]string, name string) string {
 // it makes no host call but Log, and says only what happened and to what. The
 // body of an order webhook carries the buyer's details; the one field read
 // from it is the order's global id. The body of a GDPR topic is not read at
-// all.
+// all, except that of customers/redact, of which only the customer id and the
+// order ids to erase are read (redactIDs); its email and phone are never
+// decoded.
 func webhook(ev channel.Event) (any, error) {
 	var in channel.WebhookInput
 	if err := ev.Decode(&in); err != nil {
@@ -119,7 +121,64 @@ func webhook(ev channel.Event) (any, error) {
 		}
 		out.ResourceIDs = []string{b.ID}
 	}
+	if out.Event == channel.EventCustomerRedact {
+		cust, orders, err := redactIDs(in.Body)
+		if err != nil {
+			return nil, err
+		}
+		if cust != "" {
+			out.ResourceIDs = []string{cust}
+		}
+		out.OrderIDs = orders
+	}
 	return out, nil
+}
+
+// maxRedactOrders is the host's cap on order_ids of one customer_redact
+// (ut-docs#4929); more is an error here, never a silent truncation.
+const maxRedactOrders = 10000
+
+// numericIDRe is a Shopify numeric id as the payload writes it: base-10
+// digits only (no sign, point, exponent, quote or leading zero).
+var numericIDRe = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
+
+// redactIDs reads from a customers/redact body ONLY customer.id and
+// orders_to_redact, as typed gids. Email, phone and every other field are
+// skipped by the decoder and never held. The ids are matched on their raw
+// text, so a large id is exact and a float, string or null is refused.
+func redactIDs(body []byte) (customer string, orders []string, err error) {
+	bad := errors.New("body is not a customers/redact webhook of this channel")
+	var b struct {
+		Customer *struct {
+			ID json.RawMessage `json:"id"`
+		} `json:"customer"`
+		Orders []json.RawMessage `json:"orders_to_redact"`
+	}
+	if json.Unmarshal(body, &b) != nil {
+		return "", nil, bad
+	}
+	if b.Customer != nil && b.Customer.ID != nil && string(b.Customer.ID) != "null" {
+		gid := "gid://shopify/Customer/" + string(b.Customer.ID)
+		if !numericIDRe.Match(b.Customer.ID) || !okGID(tCustomer, gid) {
+			return "", nil, bad
+		}
+		customer = gid
+	}
+	if len(b.Orders) > maxRedactOrders {
+		return "", nil, errors.New("customers/redact names more orders than the channel allows")
+	}
+	seen := make(map[string]bool, len(b.Orders))
+	for _, raw := range b.Orders {
+		gid := "gid://shopify/Order/" + string(raw)
+		if !numericIDRe.Match(raw) || !okGID(tOrder, gid) {
+			return "", nil, bad
+		}
+		if !seen[gid] {
+			seen[gid] = true
+			orders = append(orders, gid)
+		}
+	}
+	return customer, orders, nil
 }
 
 // webhookEvent maps Shopify's topic to the neutral event; the host never acts
