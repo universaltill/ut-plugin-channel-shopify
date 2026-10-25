@@ -544,9 +544,11 @@ func listingUpsert(op channel.OutboxOp) channel.Ack {
 		wantType = categoryName(p.CategoryPath[n-1])
 	}
 	// Written ONLY to a product that has no category at all in Shopify (no type,
-	// no standard category, no collection): the cloud sends category_path on
-	// every upsert, so a rule that overwrote would undo a merchant's own change
-	// at the next price edit. Changing an existing category needs the cloud to
+	// no standard category, no collection): the cloud sends category_path
+	// whenever the item's category differs from the link baseline, and with
+	// push_fields ["price"] an ack never moves that baseline (ut-docs#5014), so
+	// a rule that overwrote would undo a merchant's own change at the next
+	// price edit. Changing an existing category needs the cloud to
 	// send it only when the item's category changed (proposal on ut-docs#4942).
 	writeType := wantType != "" && cur.Variant.Product.single() == ""
 	now, ok := parseMoney(cur.Variant.Price, want.Currency)
