@@ -15,7 +15,10 @@ cd "$(dirname "$0")/.."
 
 : "${MARKETPLACE_BASE_URL:?MARKETPLACE_BASE_URL is required}"
 REVIEWER=${REVIEWER:-release-pipeline}
-RELEASE_ID=$(python3 -c "import json;print(json.load(open('dist/publish-response.json'))['data']['release_id'])")
+# RELEASE_ID may be given (approve.yml approves an already-uploaded release);
+# otherwise it is the release the publish step just recorded.
+RELEASE_ID=${RELEASE_ID:-$(python3 -c "import json;print(json.load(open('dist/publish-response.json'))['data']['release_id'])")}
+[[ "$RELEASE_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || { echo "ERROR: RELEASE_ID is not a UUID" >&2; exit 1; }
 BASE="${MARKETPLACE_BASE_URL%/}/ui/api/admin/releases/${RELEASE_ID}"
 # Admin/vendor token conflation (ut-docs#166): MARKETPLACE_UPLOAD_TOKEN is a
 # vendor-upload credential, not an admin credential, and prefers a distinct
