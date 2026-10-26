@@ -1,0 +1,36 @@
+name: Approve release
+
+# Approve an ALREADY-UPLOADED marketplace release (review-assign + approve,
+# which signs it into the current blob store) without uploading it again.
+# For a release that was uploaded but never approved, or whose approved copy
+# was lost with its old storage (ut-docs#5028). Same script, same secrets as
+# release.yml's auto-approve; no release logic lives in YAML.
+# Only the owner's lane dispatches this, and only after comparing the
+# release's permissions with the last approved one (any difference: do not).
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: "Marketplace release id (UUID, from the release workflow's upload response)"
+        type: string
+        required: true
+
+jobs:
+  approve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Approve and sign the release
+        env:
+          MARKETPLACE_BASE_URL: ${{ secrets.MARKETPLACE_BASE_URL }}
+          MARKETPLACE_ADMIN_TOKEN: ${{ secrets.MARKETPLACE_ADMIN_TOKEN }}
+          MARKETPLACE_UPLOAD_TOKEN: ${{ secrets.MARKETPLACE_UPLOAD_TOKEN }}
+          RELEASE_ID: ${{ inputs.release_id }}
+        run: scripts/approve.sh
