@@ -115,11 +115,30 @@ func TestCustomerRedactOrderLimit(t *testing.T) {
 		return sb.String()
 	}
 	got, err := askRedact(e, "customers/redact", mk(10000))
-	if err != nil || len(got.OrderIDs) != 10000 {
-		t.Fatalf("10,000 orders: %d %v", len(got.OrderIDs), err)
+	if err != nil || len(got.OrderIDs) != 10000 || got.OrderIDsTruncated {
+		t.Fatalf("10,000 orders: %d truncated=%v %v", len(got.OrderIDs), got.OrderIDsTruncated, err)
 	}
-	if _, err := askRedact(e, "customers/redact", mk(10001)); err == nil {
-		t.Error("10,001 orders accepted (never truncate)")
+	// 10,001 entries with one duplicate are 10,000 distinct: not truncated.
+	dup := strings.Replace(mk(10000), "[1,2,", "[1,1,2,", 1)
+	if got, err := askRedact(e, "customers/redact", dup); err != nil || len(got.OrderIDs) != 10000 || got.OrderIDsTruncated {
+		t.Errorf("10,001 with a duplicate: %d truncated=%v %v", len(got.OrderIDs), got.OrderIDsTruncated, err)
+	}
+	// 10,001 distinct: first 10,000 in payload order, flag set, customer kept.
+	over := strings.Replace(mk(10001), `{"orders_to_redact"`, `{"customer":{"id":77},"orders_to_redact"`, 1)
+	got, err = askRedact(e, "customers/redact", over)
+	if err != nil || len(got.OrderIDs) != 10000 || !got.OrderIDsTruncated {
+		t.Fatalf("10,001 orders: %d truncated=%v %v", len(got.OrderIDs), got.OrderIDsTruncated, err)
+	}
+	if got.OrderIDs[0] != "gid://shopify/Order/1" || got.OrderIDs[9999] != "gid://shopify/Order/10000" {
+		t.Errorf("not the first 10,000 in order: %s .. %s", got.OrderIDs[0], got.OrderIDs[9999])
+	}
+	if len(got.ResourceIDs) != 1 || got.ResourceIDs[0] != "gid://shopify/Customer/77" {
+		t.Errorf("customer id lost: %v", got.ResourceIDs)
+	}
+	// A malformed id anywhere, even past the cap, still refuses the body.
+	bad := strings.Replace(mk(10005), "10005]", `"x"]`, 1)
+	if _, err := askRedact(e, "customers/redact", bad); err == nil {
+		t.Error("bad id past the cap accepted")
 	}
 }
 

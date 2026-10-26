@@ -122,7 +122,7 @@ func webhook(ev channel.Event) (any, error) {
 		out.ResourceIDs = []string{b.ID}
 	}
 	if out.Event == channel.EventCustomerRedact {
-		cust, orders, err := redactIDs(in.Body)
+		cust, orders, truncated, err := redactIDs(in.Body)
 		if err != nil {
 			return nil, err
 		}
@@ -130,12 +130,15 @@ func webhook(ev channel.Event) (any, error) {
 			out.ResourceIDs = []string{cust}
 		}
 		out.OrderIDs = orders
+		out.OrderIDsTruncated = truncated
 	}
 	return out, nil
 }
 
 // maxRedactOrders is the host's cap on order_ids of one customer_redact
-// (ut-docs#4929); more is an error here, never a silent truncation.
+// (ut-docs#4929). A payload naming more distinct orders is not refused: the
+// first maxRedactOrders distinct ids are kept and WebhookResult.OrderIDsTruncated
+// is set so the host records it (ut-docs#5002).
 const maxRedactOrders = 10000
 
 // numericIDRe is a Shopify numeric id as the payload writes it: base-10
@@ -145,8 +148,10 @@ var numericIDRe = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
 // redactIDs reads from a customers/redact body ONLY customer.id and
 // orders_to_redact, as typed gids. Email, phone and every other field are
 // skipped by the decoder and never held. The ids are matched on their raw
-// text, so a large id is exact and a float, string or null is refused.
-func redactIDs(body []byte) (customer string, orders []string, err error) {
+// text, so a large id is exact and a float, string or null is refused. Every
+// id is validated; at most maxRedactOrders distinct ids are returned, in
+// payload order, and truncated says more distinct ids existed.
+func redactIDs(body []byte) (customer string, orders []string, truncated bool, err error) {
 	bad := errors.New("body is not a customers/redact webhook of this channel")
 	var b struct {
 		Customer *struct {
@@ -155,30 +160,33 @@ func redactIDs(body []byte) (customer string, orders []string, err error) {
 		Orders []json.RawMessage `json:"orders_to_redact"`
 	}
 	if json.Unmarshal(body, &b) != nil {
-		return "", nil, bad
+		return "", nil, false, bad
 	}
 	if b.Customer != nil && b.Customer.ID != nil && string(b.Customer.ID) != "null" {
 		gid := "gid://shopify/Customer/" + string(b.Customer.ID)
 		if !numericIDRe.Match(b.Customer.ID) || !okGID(tCustomer, gid) {
-			return "", nil, bad
+			return "", nil, false, bad
 		}
 		customer = gid
-	}
-	if len(b.Orders) > maxRedactOrders {
-		return "", nil, errors.New("customers/redact names more orders than the channel allows")
 	}
 	seen := make(map[string]bool, len(b.Orders))
 	for _, raw := range b.Orders {
 		gid := "gid://shopify/Order/" + string(raw)
 		if !numericIDRe.Match(raw) || !okGID(tOrder, gid) {
-			return "", nil, bad
+			return "", nil, false, bad
 		}
-		if !seen[gid] {
-			seen[gid] = true
-			orders = append(orders, gid)
+		if seen[gid] {
+			continue
 		}
+		if len(orders) == maxRedactOrders {
+			// Keep validating every remaining id; only the list is capped.
+			truncated = true
+			continue
+		}
+		seen[gid] = true
+		orders = append(orders, gid)
 	}
-	return customer, orders, nil
+	return customer, orders, truncated, nil
 }
 
 // webhookEvent maps Shopify's topic to the neutral event; the host never acts
