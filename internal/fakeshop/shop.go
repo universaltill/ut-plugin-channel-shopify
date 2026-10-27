@@ -169,6 +169,9 @@ type Shop struct {
 	lookup       string // VariantPrice answer shape: "", "foreign", "noproduct"
 	products     []product
 	locations    []string
+	locID        map[int]string    // ConnectTest only: the id reported for location i (0-based)
+	locName      map[int]string    // ConnectTest only: the name reported for location i
+	locOff       map[int]bool      // deactivated locations: left out of the ConnectTest answer
 	levels       map[string]*level // variantID + "@" + locationID
 	orders       []Order
 	reqs         []Request
@@ -229,7 +232,7 @@ func New(o Options) *Shop {
 	}
 	s := &Shop{opt: o, levels: map[string]*level{}, idem: map[string]string{}, keyfp: map[string]string{}, acts: map[string]int{}, codes: map[string]bool{}, tracking: map[string][3]string{},
 		lose: map[string]int{}, partial: map[string]string{}, failGQL: map[string]string{}, noCancel: map[string]bool{}, cancels: map[string]CancelRecord{}, refunds: map[string][]RefundRecord{},
-		jobs: map[string]*cancelJob{}, pending: map[string]string{}, hooks: map[string]func(){}}
+		jobs: map[string]*cancelJob{}, pending: map[string]string{}, hooks: map[string]func(){}, locID: map[int]string{}, locName: map[int]string{}, locOff: map[int]bool{}}
 	for i := 0; i < o.Locations; i++ {
 		s.locations = append(s.locations, gid("Location", 7001+i))
 	}
@@ -446,6 +449,30 @@ func (s *Shop) Locations() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.locations...)
+}
+
+// SetLocationActive deactivates (or reactivates) location n (1-based) for the
+// connect test: like Shopify's locations default (includeInactive: false), a
+// deactivated location is left out of the answer.
+func (s *Shop) SetLocationActive(n int, active bool) {
+	s.mu.Lock()
+	s.locOff[n-1] = !active
+	s.mu.Unlock()
+}
+
+// ReportLocationID makes the connect test answer id for location n (1-based),
+// e.g. a malformed gid; the shop's stock still uses the real one.
+func (s *Shop) ReportLocationID(n int, id string) {
+	s.mu.Lock()
+	s.locID[n-1] = id
+	s.mu.Unlock()
+}
+
+// SetLocationName makes the connect test answer name for location n (1-based).
+func (s *Shop) SetLocationName(n int, name string) {
+	s.mu.Lock()
+	s.locName[n-1] = name
+	s.mu.Unlock()
 }
 
 // Price is a variant's price as the shop shows it ("35.00").

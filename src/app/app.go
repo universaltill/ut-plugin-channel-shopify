@@ -38,7 +38,9 @@ func connectTest(channel.Event) (any, error) {
 		} `json:"currentAppInstallation"`
 		Locations struct {
 			Nodes []struct {
-				Name string `json:"name"`
+				ID     string `json:"id"`
+				Name   string `json:"name"`
+				Active bool   `json:"isActive"`
 			} `json:"nodes"`
 		} `json:"locations"`
 		Products struct {
@@ -57,6 +59,11 @@ func connectTest(channel.Event) (any, error) {
 	}
 	for _, l := range d.Locations.Nodes {
 		out.Locations = append(out.Locations, clip(l.Name, 100))
+		// location_list (contract section 4.1, ut-docs#5008): only a location
+		// whose gid is well formed, since the id is what a stock op names.
+		if okGID(tLocation, l.ID) {
+			out.LocationList = append(out.LocationList, channel.Location{ID: l.ID, Name: clip(l.Name, 120), Active: l.Active})
+		}
 	}
 	return out, nil
 }
