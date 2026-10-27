@@ -31,6 +31,9 @@ const (
 	// The compare-and-set field of inventorySetQuantities: required on every
 	// quantity; null turns the compare off.
 	fCompareField = "changeFromQuantity"
+	// Location.isActive: whether the location is in use. The connect test
+	// reports it as location_list[].active (ut-docs#5008).
+	fLocationActive = "isActive"
 	// Shopify's own idempotency directive for inventorySetQuantities. The
 	// Idempotency-Key HTTP header is NOT a Shopify feature: it is only a signal
 	// to the host that the POST is safe to re-send.
@@ -158,8 +161,8 @@ const orderFields = `id name createdAt updatedAt cancelledAt currencyCode taxesI
 	`lineItems(first: $lfirst) { ` + pageInfo + ` nodes { ` + lineFields + ` } }`
 
 var (
-	qConnectTest = queryDef{Name: "ConnectTest", Cost: 40, Text: `query ConnectTest { shop { name } ` +
-		`currentAppInstallation { accessScopes { handle } } locations(first: 20) { nodes { name } } ` +
+	qConnectTest = queryDef{Name: "ConnectTest", Cost: 70, Text: `query ConnectTest { shop { name } ` +
+		`currentAppInstallation { accessScopes { handle } } locations(first: 50) { nodes { id name ` + fLocationActive + ` } } ` +
 		`productsCount { count } ordersCount { count } }`}
 
 	qProducts = queryDef{Name: "Products", Cost: 700, Text: `query Products($first: Int!, $after: String, $vfirst: Int!) { ` +

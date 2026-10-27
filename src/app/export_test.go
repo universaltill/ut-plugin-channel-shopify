@@ -57,6 +57,7 @@ const (
 	FCompareField    = fCompareField
 	FCategory        = fCategory
 	FCompareAt       = fCompareAt
+	FLocationActive  = fLocationActive
 	MProductType     = mProductType
 	DIdempotent      = dIdempotent
 	MOrderCancel     = mOrderCancel

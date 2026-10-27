@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -93,6 +94,61 @@ func TestConnectTestReportsTheShopAndWritesNothing(t *testing.T) {
 	}
 	if e.shop.Writes() != 0 || e.shop.Fingerprint() != before || len(e.em.Host.Submitted) != 0 || len(e.em.Host.CursorKeys()) != 0 {
 		t.Fatal("connect test changed something")
+	}
+}
+
+// The connect test lists the shop's locations with their gids (contract
+// section 4.1 location_list, ut-docs#5008): the value stock ops carry as
+// payload.location. Shopify leaves a deactivated location out (locations'
+// includeInactive defaults to false), so it is in neither list.
+func TestConnectTestAnswersLocationListWithGidsNamesAndActiveFlags(t *testing.T) {
+	e := newEnv(t, fakeshop.Options{Locations: 3})
+	e.shop.SetLocationActive(2, false)
+	var got channel.ConnectTestResult
+	if err := json.Unmarshal(e.ask(channel.AskConnectTest, struct{}{}), &got); err != nil {
+		t.Fatal(err)
+	}
+	ids := e.shop.Locations()
+	want := []channel.Location{
+		{ID: ids[0], Name: "Invented location 1", Active: true},
+		{ID: ids[2], Name: "Invented location 3", Active: true},
+	}
+	if !reflect.DeepEqual(got.LocationList, want) {
+		t.Fatalf("location_list %+v, want %+v", got.LocationList, want)
+	}
+	if len(got.Locations) != 2 {
+		t.Errorf("locations (names) %v", got.Locations)
+	}
+	if raw := string(e.ask(channel.AskConnectTest, struct{}{})); !strings.Contains(raw, `"active":true`) || !strings.Contains(raw, `"location_list":[{"id":"gid://shopify/Location/`) {
+		t.Errorf("wire form %s", raw)
+	}
+}
+
+func TestConnectTestLeavesALocationWithAnInvalidGidOutOfLocationList(t *testing.T) {
+	e := newEnv(t, fakeshop.Options{Locations: 3})
+	e.shop.ReportLocationID(2, "gid://shopify/Location/12x")
+	e.shop.ReportLocationID(3, "")
+	var got channel.ConnectTestResult
+	if err := json.Unmarshal(e.ask(channel.AskConnectTest, struct{}{}), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.LocationList) != 1 || got.LocationList[0].ID != e.shop.Locations()[0] {
+		t.Fatalf("location_list %+v", got.LocationList)
+	}
+	if len(got.Locations) != 3 {
+		t.Errorf("the names list still carries every location: %v", got.Locations)
+	}
+}
+
+func TestConnectTestClipsALocationNameTo120Bytes(t *testing.T) {
+	e := newEnv(t, fakeshop.Options{Locations: 1})
+	e.shop.SetLocationName(1, strings.Repeat("a", 300))
+	var got channel.ConnectTestResult
+	if err := json.Unmarshal(e.ask(channel.AskConnectTest, struct{}{}), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.LocationList) != 1 || len(got.LocationList[0].Name) != 120 {
+		t.Fatalf("location_list %+v", got.LocationList)
 	}
 }
 
@@ -444,7 +500,7 @@ func TestTheQueriesAskForOneMoreThanTheCapsTheyEnforce(t *testing.T) {
 // used from there: a correction after the dev-store run is one line.
 func TestFromMemoryShopifyNamesLiveInOnePlace(t *testing.T) {
 	all := strings.Join(app.AllQueries(), "\n")
-	for _, n := range []string{app.FLineAllocations, app.FOrderTax, app.FShippingLines, app.DIdempotent, app.FFOLocation, app.MOrderCancel, app.MCancelJob, app.MRefundCreate, app.FSuggestedRefund, app.FOrderRefunds, app.FTotalRefunded, app.FCategory, app.FCompareAt, app.MProductType} {
+	for _, n := range []string{app.FLineAllocations, app.FOrderTax, app.FShippingLines, app.DIdempotent, app.FFOLocation, app.MOrderCancel, app.MCancelJob, app.MRefundCreate, app.FSuggestedRefund, app.FOrderRefunds, app.FTotalRefunded, app.FCategory, app.FCompareAt, app.MProductType, app.FLocationActive} {
 		if !strings.Contains(all, n) {
 			t.Errorf("%q is not in the query texts", n)
 		}

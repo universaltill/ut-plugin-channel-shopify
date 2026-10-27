@@ -68,7 +68,20 @@ func (s *Shop) dispatch(req gqlRequest) (any, string) {
 	case "ConnectTest":
 		var locs []obj
 		for i := range s.locations {
-			locs = append(locs, obj{"name": fmt.Sprintf("Invented location %d", i+1)})
+			// Shopify's locations(...) defaults to includeInactive: false, so a
+			// deactivated location is not listed at all (the import's
+			// qLocations relies on the same default).
+			if s.locOff[i] {
+				continue
+			}
+			id, name := s.locations[i], fmt.Sprintf("Invented location %d", i+1)
+			if v, ok := s.locID[i]; ok {
+				id = v
+			}
+			if v, ok := s.locName[i]; ok {
+				name = v
+			}
+			locs = append(locs, obj{"id": id, "name": name, "isActive": !s.locOff[i]})
 		}
 		var scopes []obj
 		for _, h := range strings.Split("read_products,write_products,read_inventory,write_inventory,read_locations,read_orders,write_orders,read_merchant_managed_fulfillment_orders,write_merchant_managed_fulfillment_orders", ",") {
