@@ -38,7 +38,8 @@ func shopifyTarget() conformance.Target {
 		NewShop:  func() conformance.Shop { return fakeshop.New(fakeshop.Options{}) },
 		Account:  probe.Account(), CredentialHeader: fakeshop.Header, Credential: probe.Token(),
 		IsWrite: isMutation, MaxCostHint: 1000, ExpectedProducts: 50,
-		WriteBack: writeBack(probe),
+		StockVariant: probe.VariantIDs(1)[0],
+		WriteBack:    writeBack(probe),
 	}
 }
 

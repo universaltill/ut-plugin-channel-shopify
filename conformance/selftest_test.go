@@ -3,8 +3,12 @@
 package conformance_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -217,4 +221,43 @@ func TestTheRealAdapterPassesChecks5And6(t *testing.T) {
 	if got := conformance.Check6WriteBackExactlyOnce(t, shopifyTarget()); len(got) != 0 {
 		t.Fatalf("check 6: %v", got)
 	}
+}
+
+// Check 10: the connect test's location ids are the ids stock.set accepts.
+
+func TestSuiteCatchesAListedLocationThatStockSetRefuses(t *testing.T) {
+	// The connect test lists a bare number, not a gid: stock.set refuses it.
+	tg := broken(channel.Handlers{channel.AskConnectTest: func(channel.Event) (any, error) {
+		return channel.ConnectTestResult{AccountName: "x", LocationList: []channel.Location{{ID: "7001", Name: "Warehouse", Active: true}}}, nil
+	}})
+	wantViolation(t, conformance.Check10ConnectLocationsAreStockSetLocations(t, tg), "refused the location")
+}
+
+// anyLocationShop is a channel that files every location id of a request under
+// its first location: the observable behaviour of a stock.set that ignores
+// payload.location, as far as the suite can see.
+type anyLocationShop struct{ conformance.Shop }
+
+var locationGIDRe = regexp.MustCompile(`gid://shopify/Location/[0-9]+`)
+
+func (a anyLocationShop) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	first := fakeshop.New(fakeshop.Options{}).Locations()[0]
+	body = locationGIDRe.ReplaceAll(body, []byte(first))
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	a.Shop.ServeHTTP(w, r)
+}
+
+func TestSuiteCatchesAStockSetThatIgnoresPayloadLocation(t *testing.T) {
+	tg := shopifyTarget()
+	tg.NewShop = func() conformance.Shop { return anyLocationShop{fakeshop.New(fakeshop.Options{})} }
+	wantViolation(t, conformance.Check10ConnectLocationsAreStockSetLocations(t, tg), "ignores payload.location")
+}
+
+func TestSuiteCatchesAConnectTestWithNoLocationList(t *testing.T) {
+	tg := broken(channel.Handlers{channel.AskConnectTest: func(channel.Event) (any, error) {
+		return channel.ConnectTestResult{AccountName: "x", Locations: []string{"Warehouse"}}, nil
+	}})
+	wantViolation(t, conformance.Check10ConnectLocationsAreStockSetLocations(t, tg), "sends no location_list")
 }

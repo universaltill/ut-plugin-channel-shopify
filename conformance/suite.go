@@ -46,6 +46,10 @@ type Target struct {
 	// Account is the connection's account host; CredentialHeader the
 	// manifest's auth.inject.header; Credential the token the shop accepts.
 	Account, CredentialHeader, Credential string
+	// StockVariant, when set, is a tracked variant id NewShop seeds; check 10
+	// sets its stock at every location the connect test lists. Without it
+	// check 10 skips.
+	StockVariant string
 	// IsWrite says whether a request changes the shop. Default: any method
 	// but GET and HEAD. A GraphQL channel sends reads as POST and overrides
 	// this to look at the operation.
@@ -113,8 +117,9 @@ func (tg Target) rig(t TB) (Shop, *Emulator) {
 	return shop, NewEmulator(t, tg.Handlers, shop, tg.Account, tg.CredentialHeader, tg.Credential)
 }
 
-// Run is the whole suite: nine checks, in the order of the contract's
-// section 6. A check whose dependency has not been built yet is a
+// Run is the whole suite: ten checks: nine in the order of the
+// contract's section 6, then check 10 (section 4.1: the connect test's
+// locations). A check whose dependency has not been built yet is a
 // clearly-marked TODO that skips with the card it waits for; it never passes
 // silently.
 func Run(t *testing.T, tg Target) {
@@ -160,6 +165,12 @@ func Run(t *testing.T, tg Target) {
 			"The adapter's part (qty never lowered, refunded and restocked quantities passed through) Shopify refunds and edits are mapped (src/app TestOrderEditAndRestockedRefundArePassedThroughNeverLoweringQty).")
 	})
 	t.Run("9_hostile_channel_and_limits", func(t *testing.T) { report(t, Check9HostileChannelAndLimits(t, tg)) })
+	t.Run("10_connect_locations_are_stock_set_locations", func(t *testing.T) {
+		if tg.StockVariant == "" {
+			t.Skip("TODO: this target sets no StockVariant, so the connect test's location_list is not checked against stock.set (contract section 4.1).")
+		}
+		report(t, Check10ConnectLocationsAreStockSetLocations(t, tg))
+	})
 }
 
 // Check2ImportIsDeterministic: the adapter side of "import 50 products with
@@ -564,6 +575,86 @@ func Check6WriteBackExactlyOnce(t TB, tg Target) []string {
 				v.addf("%s: the effect happened %d times after delivery %d, want exactly once", rig.Name, n, i)
 			}
 		}
+	}
+	return v
+}
+
+// Check10ConnectLocationsAreStockSetLocations: the ids the connect test lists
+// in location_list (contract section 4.1) are ids stock.set accepts as
+// payload.location (section 8.3), and an id it does not list is refused. The
+// connect test is what the merchant picks locations from; an id the write-back
+// cannot use would fail every stock push for good. Needs Target.StockVariant.
+func Check10ConnectLocationsAreStockSetLocations(t TB, tg Target) []string {
+	t.Helper()
+	var v violations
+	_, em := tg.rig(t)
+	r := em.Ask(channel.AskConnectTest, struct{}{})
+	if r.Err != nil {
+		v.addf("connect test failed: %v", r.Err)
+		return v
+	}
+	var ans struct {
+		LocationList []struct {
+			ID     string `json:"id"`
+			Active *bool  `json:"active"` // absent means active
+		} `json:"location_list"`
+	}
+	if err := json.Unmarshal(r.Answer, &ans); err != nil {
+		v.addf("connect test answer is not valid JSON: %v", err)
+		return v
+	}
+	if len(ans.LocationList) == 0 {
+		v.addf("connect test sends no location_list: the target sets StockVariant, so its channel has stock locations to list")
+		return v
+	}
+	// stockSetAt asks a FRESH connection to set the variant's stock at loc.
+	stockSetAt := func(opID, loc string) (ack channel.Ack, acked, changed bool) {
+		shop, em := tg.rig(t)
+		before := shop.Fingerprint()
+		em.Host.Outbox = append(em.Host.Outbox, channel.OutboxOp{
+			ID: opID, Kind: channel.OpStockSet, ExternalID: tg.StockVariant + "@" + loc,
+			Payload: json.RawMessage(fmt.Sprintf(`{"available":777,"location":%q}`, loc)),
+		})
+		if r := em.Ask(channel.AskOutbox, struct{}{}); r.Err != nil {
+			v.addf("outbox ask for location %q: %v", loc, r.Err)
+		}
+		ack, acked = em.Host.Acks[opID]
+		return ack, acked, shop.Fingerprint() != before
+	}
+	first := ""
+	for i, l := range ans.LocationList {
+		if l.Active != nil && !*l.Active {
+			continue
+		}
+		if first == "" {
+			first = l.ID
+		}
+		ack, acked, changed := stockSetAt(fmt.Sprintf("loc-%d", i), l.ID)
+		switch {
+		case !acked:
+			v.addf("stock.set at the listed location %q was not acknowledged", l.ID)
+		case ack.Error != nil:
+			v.addf("stock.set refused the location %q that the connect test lists (%s)", l.ID, ack.Error.Code)
+		case !changed:
+			v.addf("stock.set at the listed location %q was acknowledged without changing the channel", l.ID)
+		}
+	}
+	if first == "" {
+		v.addf("connect test lists no active location")
+		return v
+	}
+	unlisted := first + "9"
+	for _, l := range ans.LocationList {
+		if l.ID == unlisted {
+			unlisted += "9"
+		}
+	}
+	ack, acked, changed := stockSetAt("loc-unlisted", unlisted)
+	if acked && ack.Error == nil {
+		v.addf("stock.set accepted location %q that the connect test does not list: the adapter ignores payload.location", unlisted)
+	}
+	if changed {
+		v.addf("stock.set at the unlisted location %q changed the channel", unlisted)
 	}
 	return v
 }
