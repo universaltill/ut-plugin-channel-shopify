@@ -104,7 +104,7 @@ review record in `docs/code-reviews/<date>-<topic>.md`; then merge.
 
 Release = tag `v<version>` matching `manifest.json`, cut by `auto-tag-release.yml`
 on merge. **Any PR that changes what ships — `manifest.json`, `README.md`,
-`LICENSE`, anything under `src/`, `go.mod`/`go.sum` or `scripts/build.sh` — must
+`LICENSE`, anything under `src/`, `go.mod`/`go.sum`, `scripts/build.sh` or `scripts/package.sh` — must
 bump `manifest.json`'s `version` in the same PR** (ut-docs#1940), enforced by
 `scripts/check-version-bump.sh`. The marketplace signs the release at approval;
 the plugin repo holds no signing key.

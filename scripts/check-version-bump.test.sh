@@ -569,6 +569,33 @@ echo "early docs" >>"${case_dir}/README.md"
 commit_change
 assert_pass "no manifest.json at the merge-base or the head"
 
+# --- case (ut-docs#5147): scripts/package.sh changed, no bump -> FAIL -----
+# package.sh is the packaging recipe: adding or dropping an entry, or
+# changing the tar flags, changes the release artifact without touching any
+# bundled file. The fixture has no package.sh, so one is committed first.
+fresh_repo
+printf '#!/usr/bin/env bash\nentries=(manifest.json README.md)\n' >"${case_dir}/scripts/package.sh"
+(cd "$case_dir" && git add -A && git commit -q -m "add package.sh")
+base_sha=$(cd "$case_dir" && git rev-parse HEAD)
+echo 'entries+=(docs)' >>"${case_dir}/scripts/package.sh"
+commit_change
+assert_fail_containing "package.sh recipe changed, no bump" "scripts/package.sh" "FAIL"
+
+# --- case (ut-docs#5147): scripts/package.sh changed, version bumped -> PASS
+fresh_repo
+printf '#!/usr/bin/env bash\nentries=(manifest.json README.md)\n' >"${case_dir}/scripts/package.sh"
+(cd "$case_dir" && git add -A && git commit -q -m "add package.sh")
+base_sha=$(cd "$case_dir" && git rev-parse HEAD)
+echo 'entries+=(docs)' >>"${case_dir}/scripts/package.sh"
+python3 -c "
+import json
+m = json.load(open('${case_dir}/manifest.json'))
+m['version'] = '9.9.9'
+json.dump(m, open('${case_dir}/manifest.json', 'w'))
+"
+commit_change
+assert_pass "package.sh recipe changed, version bumped"
+
 if [ "$FAILS" -ne 0 ]; then
     echo ""
     echo "$FAILS case(s) failed."
