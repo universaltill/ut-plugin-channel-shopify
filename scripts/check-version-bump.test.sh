@@ -20,6 +20,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 REAL_SCRIPT="$(pwd)/scripts/check-version-bump.sh"
+REAL_BODY="$(pwd)/scripts/check-version-bump.body.sh"
 PACKAGE_SH="$(pwd)/scripts/package.sh"
 BUILD_SH="$(pwd)/scripts/build.sh"
 # Repo-relative form of BUILD_SH -- the build recipe is itself an input to
@@ -56,6 +57,7 @@ fresh_repo() {
         "${case_dir}/.github/workflows" "${case_dir}/docs/code-reviews"
     cp "$REAL_SCRIPT" "${case_dir}/scripts/check-version-bump.sh"
     chmod +x "${case_dir}/scripts/check-version-bump.sh"
+    cp "$REAL_BODY" "${case_dir}/scripts/check-version-bump.body.sh"
 
     cat >"${case_dir}/manifest.json" <<'JSON'
 {
@@ -595,6 +597,15 @@ json.dump(m, open('${case_dir}/manifest.json', 'w'))
 "
 commit_change
 assert_pass "package.sh recipe changed, version bumped"
+
+# --- case (ut-docs#4489, ut-docs#5155): a hand-edited shared body fails its
+# self-check -- scripts/check-version-bump.body.sh must be byte-identical to
+# ut-docs's canonical copy; any edit (here: one appended line) fails CI before
+# the guard logic runs.
+fresh_repo
+printf '# hand edit\n' >>"${case_dir}/scripts/check-version-bump.body.sh"
+head_sha="$base_sha"
+assert_fail_containing "hand-edited body fails its self-check" "differs from the canonical copy"
 
 if [ "$FAILS" -ne 0 ]; then
     echo ""
