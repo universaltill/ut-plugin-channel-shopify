@@ -91,40 +91,6 @@ type gqlOrder struct {
 	Lines   gqlLines    `json:"lineItems"`
 }
 
-// orderRecord is the contract's `order` record (sales-channel-v1.md section
-// 2). The SDK's channel.Order is thinner than the contract (no order_number,
-// tax_included, refund fields, ...), so the adapter owns this type.
-type orderRecord struct {
-	channel.Identity
-	OrderNumber         string            `json:"order_number"`
-	PlacedAt            string            `json:"placed_at"`
-	Currency            string            `json:"currency"`
-	Status              string            `json:"status"`
-	PaymentState        string            `json:"payment_state,omitempty"`
-	Lines               []orderLineRecord `json:"lines"`
-	ShippingMinor       int64             `json:"shipping_minor"`
-	ShippingTaxBP       int64             `json:"shipping_tax_bp"`
-	ShippingTaxIncluded bool              `json:"shipping_tax_included"`
-	OrderDiscountMinor  int64             `json:"order_discount_minor"`
-	TaxAddedMinor       int64             `json:"tax_added_minor"`
-	RefundTotalMinor    int64             `json:"refund_total_minor"`
-	TotalMinor          int64             `json:"total_minor"`
-}
-
-type orderLineRecord struct {
-	ExternalID        string `json:"external_id"`
-	VariantExternalID string `json:"variant_external_id,omitempty"`
-	SKU               string `json:"sku"`
-	Name              string `json:"name"`
-	Qty               int64  `json:"qty"`
-	UnitPriceMinor    int64  `json:"unit_price_minor"`
-	TaxBP             int64  `json:"tax_bp"`
-	TaxIncluded       bool   `json:"tax_included"`
-	DiscountLineMinor int64  `json:"discount_line_minor"`
-	RefundedQuantity  int64  `json:"refunded_quantity"`
-	RestockedQuantity int64  `json:"restocked_quantity"`
-}
-
 // completeLines follows an order's line pages. An order whose lines do not
 // fit in the page budget is refused, never truncated.
 func completeLines(o *gqlOrder) error {
@@ -178,36 +144,36 @@ func (o *gqlOrder) taxes(ts []gqlTaxLine) (bp, amount int64, ok bool) {
 // mapOrder turns Shopify's order into the contract's record. The status is
 // what Shopify reports; the cloud owns the canonical one. A reason code is
 // returned for an order that cannot be mapped faithfully.
-func mapOrder(o *gqlOrder) (orderRecord, string) {
+func mapOrder(o *gqlOrder) (channel.Order, string) {
 	if !okGID(tOrder, o.ID) || !timeRe.MatchString(o.UpdatedAt) || !timeRe.MatchString(o.CreatedAt) || !curRe.MatchString(o.Currency) {
-		return orderRecord{}, "bad_order"
+		return channel.Order{}, "bad_order"
 	}
 	if o.Lines.PageInfo.HasNextPage {
-		return orderRecord{}, "too_many_lines"
+		return channel.Order{}, "too_many_lines"
 	}
 	// The query asked for one more refund / refund line than the cap: seeing
 	// it means units would be under-counted, so the order is refused.
 	if len(o.Refunds) > maxRefunds {
-		return orderRecord{}, "too_many_refunds"
+		return channel.Order{}, "too_many_refunds"
 	}
 	for _, rf := range o.Refunds {
 		if len(rf.Items.Nodes) > maxRefundLines {
-			return orderRecord{}, "too_many_refunds"
+			return channel.Order{}, "too_many_refunds"
 		}
 	}
 	if len(o.ShippingLines.Nodes) > maxShippingLines {
-		return orderRecord{}, "too_many_shipping_lines"
+		return channel.Order{}, "too_many_shipping_lines"
 	}
 	total, ok1 := o.money(o.Total)
 	refundTotal, ok2 := o.money(o.TotalRefunded)
 	orderTax, ok3 := o.money(o.TotalTax)
 	if !ok1 || !ok2 || !ok3 {
-		return orderRecord{}, "bad_money"
+		return channel.Order{}, "bad_money"
 	}
-	r := orderRecord{
+	r := channel.Order{
 		Identity:    channel.Identity{ExternalID: o.ID, ExternalVersion: o.UpdatedAt},
 		OrderNumber: clip(o.Name, 40), PlacedAt: o.CreatedAt, Currency: o.Currency, PaymentState: paymentState(o.Financial),
-		ShippingTaxIncluded: o.TaxesIncluded, TotalMinor: total, RefundTotalMinor: refundTotal, Lines: []orderLineRecord{},
+		ShippingTaxIncluded: o.TaxesIncluded, TotalMinor: total, RefundTotalMinor: refundTotal, Lines: []channel.OrderLine{},
 	}
 	// Refunded and restocked units come from the refunds, per line.
 	refunded, restocked := map[string]int64{}, map[string]int64{}
@@ -231,7 +197,7 @@ func mapOrder(o *gqlOrder) (orderRecord, string) {
 			disc += m
 		}
 		if !okGID(tLineItem, l.ID) || !ok1 || !okD || !ok3 || l.Quantity < 0 || l.CurrentQuantity < 0 || l.CurrentQuantity > l.Quantity || disc > l.Quantity*unit {
-			return orderRecord{}, "bad_line"
+			return channel.Order{}, "bad_line"
 		}
 		linesSum += l.Quantity*unit - disc
 		// qty is the quantity as ordered (including units an order edit
@@ -251,7 +217,7 @@ func mapOrder(o *gqlOrder) (orderRecord, string) {
 		// stock observation of the next import or tick corrects the count.
 		removed := l.Quantity - l.CurrentQuantity
 		ref := min(l.Quantity, max(refunded[l.ID], removed))
-		lr := orderLineRecord{
+		lr := channel.OrderLine{
 			ExternalID: l.ID, SKU: clip(l.SKU, 100), Name: clip(l.Name, maxTitleBytes), Qty: l.Quantity, UnitPriceMinor: unit,
 			TaxBP: bp, TaxIncluded: o.TaxesIncluded, DiscountLineMinor: disc,
 			RefundedQuantity: ref, RestockedQuantity: min(ref, restocked[l.ID]),
@@ -268,10 +234,10 @@ func mapOrder(o *gqlOrder) (orderRecord, string) {
 		price, ok1 := o.money(s.Price)
 		bp, _, ok2 := o.taxes(s.TaxLines)
 		if !ok1 || !ok2 || price < 0 {
-			return orderRecord{}, "bad_money"
+			return channel.Order{}, "bad_money"
 		}
 		if i > 0 && bp != r.ShippingTaxBP {
-			return orderRecord{}, "mixed_shipping_tax"
+			return channel.Order{}, "mixed_shipping_tax"
 		}
 		ship += price
 		r.ShippingTaxBP = bp
@@ -287,7 +253,7 @@ func mapOrder(o *gqlOrder) (orderRecord, string) {
 	// Shopify's numbers do not explain (a duty, a tip, an edit that changed the
 	// original total, a rounding gap) is refused with a logged code instead.
 	if got := linesSum + ship - r.OrderDiscountMinor + r.TaxAddedMinor; got != total {
-		return orderRecord{}, "total_mismatch"
+		return channel.Order{}, "total_mismatch"
 	}
 	r.Status = orderStatus(o, total, refundTotal)
 	return r, ""
@@ -343,7 +309,7 @@ func fetch(ev channel.Event) (any, error) {
 	if len(in.ResourceIDs) > maxFetchIDs {
 		return nil, errors.New("too many resources")
 	}
-	var recs []orderRecord
+	var recs []channel.Order
 	overBudget := false
 	for _, id := range in.ResourceIDs {
 		if spent.cost >= askCostBudget {
@@ -440,7 +406,7 @@ func pullOrders() (int, error) {
 		if err := run(qOrders, vars, "", &d); err != nil {
 			return total, err
 		}
-		recs := make([]orderRecord, 0, len(d.Orders.Nodes))
+		recs := make([]channel.Order, 0, len(d.Orders.Nodes))
 		for i := range d.Orders.Nodes {
 			o := &d.Orders.Nodes[i]
 			if timeRe.MatchString(o.UpdatedAt) && o.UpdatedAt > newest {

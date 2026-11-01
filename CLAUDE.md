@@ -55,6 +55,9 @@ hand-rolled `//go:wasmimport` lines. It runs only in the ut-cloud channel host
   ut-docs#4774.
 - **Records are deterministic** (`external_version` = Shopify's `updatedAt`) so
   the host's idempotency gives "zero changes" on a second run. No clocks.
+- **The orders record is the SDK's `channel.Order`**, which carries the
+  contract's full record (universal-till#2146, ut-docs#4994). Never add an
+  adapter-local copy; `TestSubmittedOrderBytesAreStable` pins the wire bytes.
 - **Money** is integer minor units by string arithmetic (`money.go`); a
   mismatching currency is refused, never converted.
 - **Mutations**: a write that is safe to repeat carries the op id as
