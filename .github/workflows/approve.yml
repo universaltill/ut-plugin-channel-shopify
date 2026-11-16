@@ -29,7 +29,7 @@ jobs:
 
       - name: Approve and sign the release
         env:
-          MARKETPLACE_BASE_URL: ${{ secrets.MARKETPLACE_BASE_URL }}
+          MARKETPLACE_BASE_URL: ${{ vars.MARKETPLACE_BASE_URL }}
           MARKETPLACE_ADMIN_TOKEN: ${{ secrets.MARKETPLACE_ADMIN_TOKEN }}
           MARKETPLACE_UPLOAD_TOKEN: ${{ secrets.MARKETPLACE_UPLOAD_TOKEN }}
           RELEASE_ID: ${{ inputs.release_id }}
