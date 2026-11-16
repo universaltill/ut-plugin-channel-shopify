@@ -12,7 +12,7 @@
 # the real check.
 #
 # This fixture mirrors the COMPILED-plugin shape (WASI module built from
-# src/ via go build), unlike ut-plugin-language-{de,es}'s asset-only
+# src/ via go build), unlike the asset-only (ut-plugin-theme-*)
 # fixture -- see check-version-bump.sh's own header for why that matters
 # (bin/ is gitignored and undiffable, so the guard keys off src/**/go.mod/
 # go.sum instead of the literal bundled path).

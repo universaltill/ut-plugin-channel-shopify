@@ -15,7 +15,7 @@
 # unchanged version, sees v<version> already tagged/released, and correctly
 # does nothing. main and the marketplace diverge with no failing signal
 # anywhere. Already needed hand repair at least three times in
-# ut-plugin-language-de/-es before that guard existed there (ut-docs#1940).
+# the former language packs before that guard existed there (ut-docs#1940).
 #
 # WHAT COUNTS AS "SHIPPED" -- THE COMPILED-PLUGIN VARIANT: this repo builds
 # a WASI module (scripts/build.sh: `go build -o bin/plugin.wasm ./src`) and
@@ -23,7 +23,7 @@
 # directly -- but `bin/` is gitignored (see .gitignore), so it can NEVER
 # appear in `git diff --name-only` no matter how much the plugin's behaviour
 # changed. Keying SHIPPED_PATTERNS off the literal bundled path, the way the
-# asset-only plugins (ut-plugin-language-{de,es}, ut-plugin-theme-*) do, is
+# asset-only plugins (ut-plugin-theme-*) do, is
 # therefore unsafe here -- it would silently never fire. Instead this keys
 # off the SOURCE that PRODUCES bin/plugin.wasm: every file under src/ (the
 # `go build ... ./src` argument), plus go.mod/go.sum (a dependency bump
