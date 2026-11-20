@@ -359,13 +359,23 @@ func fetch(ev channel.Event) (any, error) {
 	return out, nil
 }
 
-// tick is the scheduled reconciliation: orders updated since the cursor.
+// tick is the scheduled reconciliation: orders updated since the cursor, then
+// (only with budget left) a resumable stock sweep. Stock is observed here and
+// not in the import because the host accepts stock_observed in a tick and
+// refuses it in a pull (ut-docs#6821).
 func tick(channel.Event) (any, error) {
 	n, err := pullOrders()
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"orders": n}, nil
+	m, err := sweepStock()
+	if err != nil {
+		// The orders are submitted and their cursor moved: the ask is healthy.
+		// The sweep's place was saved after its last good page, so the next
+		// tick resumes there.
+		logErr("stock.sweep_failed", err)
+	}
+	return map[string]any{"orders": n, "observed": m}, nil
 }
 
 // sinceQuery is Shopify's search filter for "updated since". The timestamp is

@@ -182,6 +182,7 @@ type Shop struct {
 	acts         map[string]int    // "<kind>:<id>" -> times performed
 	failFO       map[string]bool   // fulfilment orders whose fulfillment is refused
 	schemaErr    map[string]bool   // operations answered with a schema error
+	failAfter    map[string]int    // operation -> successful calls left before it fails
 	codes        map[string]bool
 	tracking     map[string][3]string
 	lose         map[string]int    // operation -> answers still to lose AFTER performing it

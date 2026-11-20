@@ -23,8 +23,9 @@ Everything in this repository is invented data.
 | `channel.connect.test.ask` | Reads the shop name, granted access scopes, locations and counts of products and orders. Writes nothing. |
 | `channel.oauth.callback.ask` | Parses the install parameters the host already verified; checks the shop domain; returns account and scopes. The host does the code exchange and the HMAC check; the plugin never sees a token or a secret. |
 | `channel.webhook.ask` | Parses a webhook the host already verified: topic, shop domain and webhook id from the headers, the order's global id from an order webhook. GDPR topics: the body is not read, except `customers/redact`, where only `customer.id` (as `resource_ids`) and `orders_to_redact` (as `order_ids`, each a positive integer, else the body is refused; at most 10,000 distinct ids are kept, in payload order, and `order_ids_truncated` is set when more were named) are read; email and phone never are. No tenant context. |
-| `channel.import.ask` | Pages through products with variants (Admin GraphQL, cursor paging), then through every location's inventory levels. Submits `listing` and `stock_observed` records. Resumable through cursors; records are deterministic (`external_version` is Shopify's `updatedAt`) so a second import is byte-identical and the host reports zero changes. |
-| `channel.fetch.ask` / `channel.tick` | Re-fetch named orders / sweep orders updated since the `orders.since` cursor and submit contract `order` records with **no customer name, address, email or phone**. |
+| `channel.import.ask` | Pages through products with variants (Admin GraphQL, cursor paging) and submits `listing` records only. Resumable through the `import.products` cursor; records are deterministic (`external_version` is Shopify's `updatedAt`) so a second import is byte-identical and the host reports zero changes. It reads and submits no stock: the host refuses `stock_observed` in a pull (ut-docs#6821). |
+| `channel.fetch.ask` | Re-fetch named orders and submit contract `order` records with **no customer name, address, email or phone**. |
+| `channel.tick` | Sweep orders updated since the `orders.since` cursor (same record), then, only with the ask's cost budget left, a resumable stock sweep: the available quantity of every tracked variant at every location (first 20), submitted as `stock_observed` (the host accepts it in a tick; it feeds "use channel stock as starting count", ADR-0169 section 1.1). At most 3 stock pages (150 levels) per tick, and fewer when orders used the budget, resumed from the `tick.stock.loc` / `tick.stock.after` cursors; after a full pass the next tick starts a new one. Records are deterministic (identity variant@location, version the level's `updatedAt` and quantity), so a repeat pass is a host no-op. A tick whose orders used the budget reads no stock. Each stock page costs 300 points (hint). |
 | `channel.contact.ask` | Fetches an order's contact details live for display; never stored, submitted or logged. |
 | `channel.outbox.ask` | `stock.set` (absolute, compare-and-set on `expect`, inactive levels activated, a stale `expect` reports the shop's value and pulls recent orders), `fulfilment.create` (shipped with carrier and tracking), `order.cancel` and `refund.create` (below), `listing.upsert` (one variant's price and the product's `productType` from the category: the op's external id is the Shopify VARIANT id, as the cloud sends it; the variant is read first, then its own product is updated; a price that already matches is acked without a write; a zero or negative price is refused `invalid_price`, another currency `currency_mismatch`, an unknown variant `not_found`, all non-retryable; other fields are ignored without error and logged once per ask, on success only, as `listing.fields_ignored`; the ack keeps the variant id; an upsert without an external id is a create and is refused with the non-retryable `create_not_supported`, nothing sent). Anything else is dead-lettered with `unsupported_op` and a logged `outbox.unsupported_op`: a delete, and `listing.unpublish` (a product draft is an item push: card ut-docs#4774). Nothing is ever deleted. |
 
@@ -68,8 +69,8 @@ connection's verified account and adds the access token.
   title is at most 250 bytes of valid UTF-8 (the cloud refuses over 256 bytes
   after decoding), invalid bytes are dropped. An edit-removed unit of an unpaid
   order is `refunded_quantity` but never `restocked_quantity` (no refund line
-  says it went back; the stock observation of the next import or tick corrects
-  the count).
+  says it went back; the stock sweep's observation only records Shopify's
+  last-known level, it never changes the till's stock).
   A unit is counted once in `refunded_quantity` (the larger of the refund lines
   and the edit-removed units, never the sum). The query reads at most 5 refunds
   and 20 refund lines each; it asks for one more, and an order that overflows is
@@ -137,9 +138,10 @@ connection's verified account and adds the access token.
   lost, it only lags. A fetch takes up to 250 ids (the host's cap), reads what
   its budget allows and leaves the rest to the next tick sweep
   (`fetch.deferred_to_tick`). Import stops near 9,000 points per ask and
-  resumes from its cursor.
-- **Locations**: an import reads the first 20; a shop with more logs
-  `import.locations_truncated`.
+  resumes from its cursor. A tick sweeps stock only after its orders and
+  only while it stays inside the 1,500 point budget, at most 3 pages. A failing stock page is logged (`stock.sweep_failed`) and does not fail the tick; the sweep resumes after its last good page.
+- **Locations**: the stock sweep reads the first 20; a shop with more logs
+  `stock.locations_truncated` (once per pass).
 - **Fulfilment** reads the order's fulfilment orders first and fulfils the open
   ones with the tracking details, one `fulfillmentCreate` per location (Shopify
   refuses a fulfillment spanning locations). If one location is refused the
@@ -230,7 +232,7 @@ and a test keeps them there. First run on the development store, in this order:
 | Duties and tips are not in `totalPriceSet`, or the formula refuses them | `mapOrder` | `order.refused.total_mismatch` for an order with a tip or duties; decide with the cloud whether the contract needs a field for them. |
 | `totalPriceSet` is the ORIGINAL total (before edits), matching `quantity` as ordered; an edit that adds or removes units does not change it | `mapOrder` | `order.refused.total_mismatch` on an edited order (then the contract formula needs `currentTotalPriceSet` with current quantities, a design change). |
 | `currentQuantity` = quantity minus every unit an edit removed AND every refunded unit | `mapOrder` (`max(refunded, removed)`) | `refunded_quantity` too low (an edit-removal plus a separate refund) or too high. |
-| An edit-removed unit of an UNPAID order has no refund line, and Shopify restocks it (or not) by its own rule | `mapOrder` | `restocked_quantity` stays 0 for it by design. Failing looks like Universal Till stock staying below Shopify's by the removed units after the next import/tick (no stock observation corrects it): then the mapping needs the edit's restock choice. |
+| An edit-removed unit of an UNPAID order has no refund line, and Shopify restocks it (or not) by its own rule | `mapOrder` | `restocked_quantity` stays 0 for it by design. Failing looks like Universal Till stock staying below Shopify's by the removed units after the next tick (no stock observation corrects it): then the mapping needs the edit's restock choice. |
 | *Verified 2026-10-24.* `customer` on an order needs `read_customers`, which the app does not hold, so no order query selects it; orders arrive without a `customer` ref (the contract makes it optional). The contact answer takes its name from the shipping address | `orderFields`, `qContact` | Failing looks like every order read answering ACCESS_DENIED. Add the scope deliberately before ever selecting `customer` again. |
 | `read_all_orders` is not in the scope list | `manifest.json` | Orders older than 60 days are invisible: an import of history stays empty. |
 | `refunds(first: 6)` / `refundLineItems(first: 21)`, `locations(first: 21)` cost and shape | `queries.go` | Throttling, or `order.refused.too_many_refunds` for ordinary orders. |

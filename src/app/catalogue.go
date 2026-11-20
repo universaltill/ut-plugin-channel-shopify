@@ -2,24 +2,21 @@ package app
 
 import (
 	"errors"
-	"regexp"
-	"strconv"
 
 	"github.com/universaltill/universal-till/sdk/plugin/channel"
 )
 
-// Import cursors. The import is two stages: products with variants, then the
-// stock level of every tracked variant at every location. Each stage resumes
-// from where it stopped; a finished import clears them all, so the next one
-// starts again from the top and (being deterministic) changes nothing.
-const (
-	curStage    = "import.stage"
-	curProducts = "import.products"
-	curLoc      = "import.stock.loc"
-	curLocAfter = "import.stock.after"
-)
+// Import cursor. The import reads products with variants and resumes from
+// where it stopped; a finished import clears it, so the next one starts again
+// from the top and (being deterministic) changes nothing. Stock is not part of
+// it: the host refuses stock_observed in a pull, so the tick sweeps it
+// (stock.go, ut-docs#6821).
+const curProducts = "import.products"
 
-var stageRe = regexp.MustCompile(`^stock$`)
+// legacyImportCursors are the stock stage's cursors of 0.4.4 and earlier. An
+// upgraded install may still hold them; the import clears them and never
+// reads them.
+var legacyImportCursors = []string{"import.stage", "import.stock.loc", "import.stock.after"}
 
 type pageInfoT struct {
 	HasNextPage bool   `json:"hasNextPage"`
@@ -94,35 +91,27 @@ type shopInfo struct {
 	TaxesIncluded bool   `json:"taxesIncluded"`
 }
 
-type importStats struct{ imported, observed, skipped int64 }
+type importStats struct{ imported, skipped int64 }
 
-// importCatalogue pulls the shop's products and stock page by page and
-// submits them as listings and stock observations. Records are deterministic
-// (external_version is Shopify's updatedAt; a stock observation's is the
-// level's updatedAt and quantity), so a second import is byte-identical and
-// the host reports zero changes. Nothing is ever written to Shopify.
+// importCatalogue pulls the shop's products page by page and submits them as
+// listings. Records are deterministic (external_version is Shopify's
+// updatedAt), so a second import is byte-identical and the host reports zero
+// changes. It submits no stock: stock_observed is refused outside a run
+// (ut-docs#6821). Nothing is ever written to Shopify.
 func importCatalogue(channel.Event) (any, error) {
-	var st importStats
-	done := false
-	if cursor(curStage, stageRe) == "" {
-		finished, err := importProducts(&st)
-		if err != nil {
-			return nil, err
-		}
-		if finished {
-			if err := cursorSet(curStage, []byte("stock")); err != nil {
+	if cursor(legacyImportCursors[0], cursorRe) != "" { // only an upgraded install has it
+		for _, k := range legacyImportCursors {
+			if err := cursorSet(k, nil); err != nil {
 				return nil, err
 			}
 		}
 	}
-	if cursor(curStage, stageRe) == "stock" {
-		finished, err := importStock(&st)
-		if err != nil {
-			return nil, err
-		}
-		done = finished
+	var st importStats
+	done, err := importProducts(&st)
+	if err != nil {
+		return nil, err
 	}
-	return map[string]any{"done": done, "imported": st.imported, "observed": st.observed, "skipped": st.skipped}, nil
+	return map[string]any{"done": done, "imported": st.imported, "skipped": st.skipped}, nil
 }
 
 func importProducts(st *importStats) (finished bool, err error) {
@@ -270,131 +259,4 @@ func listingStatus(s string) string {
 		return "archived"
 	}
 	return "draft"
-}
-
-// importStock reads every location's inventory levels and submits the
-// available quantity of each tracked variant as an observation. The channel's
-// number is an observation; Universal Till decides (contract section 2).
-func importStock(st *importStats) (finished bool, err error) {
-	var ld struct {
-		Locations struct {
-			Nodes []struct {
-				ID string `json:"id"`
-			} `json:"nodes"`
-		} `json:"locations"`
-	}
-	if err := run(qLocations, map[string]any{"first": maxLocations + 1}, "", &ld); err != nil {
-		return false, err
-	}
-	if len(ld.Locations.Nodes) > maxLocations {
-		// Never drop stock silently: the shop has more locations than one
-		// import reads. The first maxLocations are imported.
-		hostLog(channel.LevelWarn, "import.locations_truncated", map[string]any{"read": maxLocations})
-		ld.Locations.Nodes = ld.Locations.Nodes[:maxLocations]
-	}
-	var locs []string
-	for _, n := range ld.Locations.Nodes {
-		if okGID(tLocation, n.ID) {
-			locs = append(locs, n.ID)
-		}
-	}
-	idx, after := 0, ""
-	if cur := cursor(curLoc, gidRes[tLocation]); cur != "" {
-		for i, l := range locs {
-			if l == cur {
-				idx, after = i, cursor(curLocAfter, cursorRe)
-			}
-		}
-	}
-	for pages := 0; idx < len(locs); {
-		if pages >= maxStockPages || spent.cost >= importCostBudget {
-			if err := cursorSet(curLoc, []byte(locs[idx])); err != nil {
-				return false, err
-			}
-			return false, cursorSet(curLocAfter, []byte(after))
-		}
-		pages++
-		vars := map[string]any{"id": locs[idx], "first": stockPage}
-		if after != "" {
-			vars["after"] = after
-		}
-		var d struct {
-			Location *struct {
-				Levels struct {
-					PageInfo pageInfoT `json:"pageInfo"`
-					Nodes    []struct {
-						UpdatedAt string `json:"updatedAt"`
-						Item      struct {
-							Tracked bool `json:"tracked"`
-							Variant *struct {
-								ID string `json:"id"`
-							} `json:"variant"`
-						} `json:"item"`
-						Quantities []struct {
-							Quantity int64 `json:"quantity"`
-						} `json:"quantities"`
-					} `json:"nodes"`
-				} `json:"inventoryLevels"`
-			} `json:"location"`
-		}
-		if err := run(qLevels, vars, "", &d); err != nil {
-			return false, err
-		}
-		after = ""
-		if d.Location != nil {
-			var obs []channel.StockObserved
-			for _, n := range d.Location.Levels.Nodes {
-				if !n.Item.Tracked || n.Item.Variant == nil || !okGID(tVariant, n.Item.Variant.ID) || len(n.Quantities) != 1 ||
-					n.Quantities[0].Quantity < 0 || !timeRe.MatchString(n.UpdatedAt) {
-					continue
-				}
-				obs = append(obs, observed(n.Item.Variant.ID, locs[idx], n.Quantities[0].Quantity, n.UpdatedAt))
-			}
-			if len(obs) > 0 {
-				if err := submitObserved(obs); err != nil {
-					return false, err
-				}
-				st.observed += int64(len(obs))
-			}
-			if pi := d.Location.Levels.PageInfo; pi.HasNextPage {
-				if !cursorRe.MatchString(pi.EndCursor) {
-					return false, errors.New("channel sent a page cursor that is not a cursor")
-				}
-				after = pi.EndCursor
-			}
-		}
-		if after == "" {
-			idx++
-		}
-	}
-	for _, k := range []string{curStage, curLoc, curLocAfter} {
-		if err := cursorSet(k, nil); err != nil {
-			return false, err
-		}
-	}
-	return true, nil
-}
-
-func submitObserved(recs []channel.StockObserved) error {
-	for len(recs) > 0 {
-		n := len(recs)
-		if n > channel.MaxBatchRecords {
-			n = channel.MaxBatchRecords
-		}
-		if _, err := submit(channel.KindStockObserved, recs[:n]); err != nil {
-			return err
-		}
-		recs = recs[n:]
-	}
-	return nil
-}
-
-// observed builds a stock observation. Its identity is the variant at the
-// location; its version is the level's updatedAt and quantity, so it changes
-// exactly when the quantity does.
-func observed(variant, location string, available int64, version string) channel.StockObserved {
-	return channel.StockObserved{
-		Identity: channel.Identity{ExternalID: variant + "@" + location, ExternalVersion: version + ":" + strconv.FormatInt(available, 10)},
-		Variant:  variant, Location: location, Available: available,
-	}
 }

@@ -64,6 +64,12 @@ func (s *Shop) dispatch(req gqlRequest) (any, string) {
 	if s.schemaErr[req.OperationName] {
 		return nil, "undefinedField"
 	}
+	if n, ok := s.failAfter[req.OperationName]; ok {
+		if n <= 0 {
+			return nil, "undefinedField"
+		}
+		s.failAfter[req.OperationName] = n - 1
+	}
 	switch req.OperationName {
 	case "ConnectTest":
 		var locs []obj
@@ -606,6 +612,21 @@ func (s *Shop) SchemaError(operation string) {
 		s.schemaErr = map[string]bool{}
 	}
 	s.schemaErr[operation] = true
+}
+
+// FailAfter lets the named operation succeed n more times, then fail like
+// SchemaError does (a mid-sweep failure). A negative n clears it.
+func (s *Shop) FailAfter(operation string, n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failAfter == nil {
+		s.failAfter = map[string]int{}
+	}
+	if n < 0 {
+		delete(s.failAfter, operation)
+		return
+	}
+	s.failAfter[operation] = n
 }
 
 // --- merchant-side edits for tests ---------------------------------------
