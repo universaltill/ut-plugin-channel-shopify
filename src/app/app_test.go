@@ -69,7 +69,29 @@ func (e *env) importAll() (asks int) {
 	return 0
 }
 
-// tickAll runs ticks until one reports nothing left to resume.
+// assertNoStockInImport: an import submits no stock_observed and never reads
+// a stock level (ut-docs#6821).
+func (e *env) assertNoStockInImport() {
+	e.t.Helper()
+	if n := len(e.submitted(channel.KindStockObserved)); n != 0 {
+		e.t.Fatalf("an import submitted %d stock_observed records: the host refuses them outside a run", n)
+	}
+	if n := e.levelRequests(); n != 0 {
+		e.t.Fatalf("an import read %d stock pages: it feeds nothing", n)
+	}
+}
+
+// levelRequests counts the inventory-level pages requested so far.
+func (e *env) levelRequests() (n int) {
+	for _, s := range e.em.Seen() {
+		if strings.Contains(string(s.Body), "query Levels(") {
+			n++
+		}
+	}
+	return n
+}
+
+// tick runs one tick ask and returns how many orders it submitted.
 func (e *env) tick() int {
 	e.t.Helper()
 	var ans struct{ Orders int }
@@ -250,7 +272,7 @@ func TestWebhookRefusesWhatIsNotOfThisChannel(t *testing.T) {
 	}
 }
 
-func TestImportSubmitsEveryProductWithVariantsAndStock(t *testing.T) {
+func TestImportSubmitsEveryProductWithVariantsAndNoStock(t *testing.T) {
 	e := newEnv(t, fakeshop.Options{})
 	e.importAll()
 	listings := e.submitted(channel.KindListing)
@@ -263,14 +285,12 @@ func TestImportSubmitsEveryProductWithVariantsAndStock(t *testing.T) {
 		}
 	}
 	byID := map[string]channel.Listing{}
-	variants := 0
 	for _, raw := range listings {
 		var l channel.Listing
 		if err := json.Unmarshal(raw, &l); err != nil {
 			t.Fatal(err)
 		}
 		byID[l.ExternalID] = l
-		variants += len(l.Variants)
 	}
 	p1 := byID[e.shop.ProductIDs()[0]] // product 1: 2 variants, active
 	if p1.Title != "Invented item 1" || p1.Status != "active" || len(p1.Variants) != 2 || p1.ExternalVersion != "2026-10-22T09:00:01Z" {
@@ -284,15 +304,9 @@ func TestImportSubmitsEveryProductWithVariantsAndStock(t *testing.T) {
 	if p3 := byID[e.shop.ProductIDs()[2]]; p3.Status != "draft" || len(p3.Variants) != 1 || len(p3.Variants[0].Options) != 0 {
 		t.Fatalf("product 3 (draft, default option dropped) %+v", p3)
 	}
-	obs := e.submitted(channel.KindStockObserved)
-	if len(obs) != variants {
-		t.Fatalf("%d stock observations for %d variants", len(obs), variants)
-	}
-	var o channel.StockObserved
-	_ = json.Unmarshal(obs[0], &o)
-	if o.Variant != e.shop.VariantIDs(1)[0] || o.Location != e.shop.Locations()[0] || o.Available != 11 || o.ExternalID == "" {
-		t.Fatalf("observation %+v", o)
-	}
+	// ut-docs#6821: the host refuses stock_observed in a pull (no run to
+	// attach it to), so an import reads and submits no stock at all.
+	e.assertNoStockInImport()
 	if e.shop.Writes() != 0 {
 		t.Fatal("import wrote to the shop")
 	}
@@ -302,16 +316,7 @@ func TestImportTwiceSubmitsTheSameRecords(t *testing.T) {
 	e := newEnv(t, fakeshop.Options{Locations: 2})
 	e.importAll()
 	first := e.em.Host.Submitted
-	var variants int
-	for _, raw := range e.submitted(channel.KindListing) {
-		var l channel.Listing
-		_ = json.Unmarshal(raw, &l)
-		variants += len(l.Variants)
-	}
-	// Two locations: every tracked variant is observed at both.
-	if n := len(e.submitted(channel.KindStockObserved)); n != 2*variants {
-		t.Fatalf("%d observations for %d variants at 2 locations", n, variants)
-	}
+	e.assertNoStockInImport()
 	e.em.Host.Submitted = nil
 	e.importAll()
 	second := e.em.Host.Submitted
@@ -363,24 +368,6 @@ func TestImportFollowsMoreVariantsAndRefusesOverTheLimits(t *testing.T) {
 	}
 	if refused != 2 {
 		t.Errorf("%d refusals logged, want 2 (with a reason, not silently)", refused)
-	}
-}
-
-func TestImportSkipsUntrackedAndKeepsNeverDeleting(t *testing.T) {
-	e := newEnv(t, fakeshop.Options{Products: 2})
-	e.shop.SetTracked(e.shop.VariantIDs(1)[0], false)
-	e.importAll()
-	var obs int
-	for _, raw := range e.submitted(channel.KindStockObserved) {
-		var o channel.StockObserved
-		_ = json.Unmarshal(raw, &o)
-		if o.Variant == e.shop.VariantIDs(1)[0] {
-			t.Error("an untracked variant has no stock to observe")
-		}
-		obs++
-	}
-	if obs != 4 {
-		t.Errorf("%d observations, want 4 (5 variants, 1 untracked)", obs)
 	}
 }
 
@@ -444,27 +431,6 @@ func TestPrivateIDsAndPIIAreNotPassedToTheLogs(t *testing.T) {
 				t.Errorf("log %s contains %q", l.Code, pii)
 			}
 		}
-	}
-}
-
-func TestAShopWithMoreLocationsThanTheImportReadsIsLoggedNotSilentlyCut(t *testing.T) {
-	logged := func(e *env) bool {
-		for _, l := range e.em.Host.Logs {
-			if l.Code == "import.locations_truncated" {
-				return true
-			}
-		}
-		return false
-	}
-	e := newEnv(t, fakeshop.Options{Locations: app.MaxLocations})
-	e.importAll()
-	if logged(e) {
-		t.Error("exactly the cap is not a truncation")
-	}
-	e = newEnv(t, fakeshop.Options{Locations: app.MaxLocations + 1})
-	e.importAll()
-	if !logged(e) {
-		t.Error("a 21st location was dropped without a reason code in the log")
 	}
 }
 

@@ -137,7 +137,7 @@ const (
 	maxShippingLines   = 10
 	shippingLinesAsked = "11"
 	// maxLocations is how many locations a shop is read for; a shop with more
-	// is logged (import.locations_truncated), never dropped silently.
+	// is logged (stock.locations_truncated), never dropped silently.
 	maxLocations = 20
 )
 

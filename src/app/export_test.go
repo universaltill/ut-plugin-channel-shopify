@@ -17,16 +17,17 @@ func AllQueries() []string {
 func Clip(s string, n int) string { return clip(s, n) }
 
 const (
-	MaxTitleBytes    = maxTitleBytes
-	OrderPage        = orderPage
-	MaxFetchIDs      = maxFetchIDs
-	MaxOrderPages    = maxOrderPages
-	DrainHTTPBudget  = drainHTTPBudget
-	DrainHostBudget  = drainHostBudget
-	DrainCostBudget  = drainCostBudget
-	AskCostBudget    = askCostBudget
-	AskCostCap       = askCostCap
-	ImportCostBudget = importCostBudget
+	MaxTitleBytes     = maxTitleBytes
+	OrderPage         = orderPage
+	MaxFetchIDs       = maxFetchIDs
+	MaxOrderPages     = maxOrderPages
+	DrainHTTPBudget   = drainHTTPBudget
+	DrainHostBudget   = drainHostBudget
+	DrainCostBudget   = drainCostBudget
+	AskCostBudget     = askCostBudget
+	AskCostCap        = askCostCap
+	ImportCostBudget  = importCostBudget
+	MaxTickStockPages = maxTickStockPages
 )
 
 // ParseMoney, FormatMoney and RateBP expose the money helpers to tests.

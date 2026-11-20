@@ -107,9 +107,12 @@ const (
 	maxOptions      = 3   // manifest limits.max_options
 	maxProductPages = 40  // per import ask; the rest resumes from the cursor
 	stockPage       = 50
-	maxStockPages   = 40
-	linePage        = 20
-	maxExtraLinePgs = 2 // an order over 60 lines is refused, logged, never truncated
+	// maxTickStockPages caps the stock pages one tick reads, after orders and
+	// only while askCostBudget has room (ut-docs#6821); the rest resumes from
+	// tick.stock.*.
+	maxTickStockPages = 3
+	linePage          = 20
+	maxExtraLinePgs   = 2 // an order over 60 lines is refused, logged, never truncated
 )
 
 // statusError is a non-2xx answer. It carries the status only, never a body:
