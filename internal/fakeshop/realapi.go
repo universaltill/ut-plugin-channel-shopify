@@ -74,13 +74,13 @@ func realAPIRefusal(req gqlRequest) (msg, code string) {
 		if json.Unmarshal(req.Variables["product"], &in) == nil {
 			for k, raw := range in {
 				switch k {
-				case "id", "productType":
+				case "id", "productType", "title", "status":
 					var sv string
 					if json.Unmarshal(raw, &sv) != nil {
 						return "Variable $product of type ProductUpdateInput! was provided invalid value for " + k + " (Could not coerce value to String)", "INVALID_VARIABLE"
 					}
 				default:
-					return "Variable $product of type ProductUpdateInput! was provided invalid value for " + k + " (the adapter only ever sets productType)", "INVALID_VARIABLE"
+					return "Variable $product of type ProductUpdateInput! was provided invalid value for " + k + " (the adapter only ever sets productType, title and status)", "INVALID_VARIABLE"
 				}
 			}
 		}

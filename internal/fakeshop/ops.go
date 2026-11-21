@@ -175,7 +175,8 @@ func (s *Shop) dispatch(req gqlRequest) (any, string) {
 			case "noproduct": // a variant whose product is gone
 				return obj{"productVariant": obj{"id": v.ID, "product": nil, "price": v.Price}}, ""
 			}
-			return obj{"productVariant": obj{"id": v.ID, "product": obj{"id": pr.ID, "productType": pr.ProductType, "category": taxonomyJSON(*pr), "collections": collectionsJSON(*pr)}, "price": v.Price}}, ""
+			return obj{"productVariant": obj{"id": v.ID, "product": obj{"id": pr.ID, "title": pr.Title, "status": pr.Status, "updatedAt": pr.UpdatedAt, "variantsCount": obj{"count": len(pr.Variants)},
+				"productType": pr.ProductType, "category": taxonomyJSON(*pr), "collections": collectionsJSON(*pr)}, "price": v.Price}}, ""
 		}
 		return obj{"productVariant": nil}, ""
 	case "ProductType":
@@ -754,22 +755,38 @@ func collectionsJSON(p product) obj {
 	return obj{"nodes": n}
 }
 
-// opProductType is productUpdate(product: {id, productType}). It changes the
-// product type and nothing else; an unknown product is a userError.
+// opProductType is productUpdate(product: {id, productType, title, status}).
+// It changes the fields that are present and nothing else; an unknown product
+// is a userError. A title must be 1..255 characters (Shopify refuses others).
 func (s *Shop) opProductType(req gqlRequest) obj {
 	var in struct {
-		ID          string `json:"id"`
-		ProductType string `json:"productType"`
+		ID          string  `json:"id"`
+		ProductType *string `json:"productType"`
+		Title       *string `json:"title"`
+		Status      *string `json:"status"`
 	}
 	s.vars(req, "product", &in)
 	if s.refuseType {
 		return obj{"productUpdate": obj{"userErrors": []obj{{"field": []string{"productType"}}}}}
 	}
+	if in.Title != nil && (strings.TrimSpace(*in.Title) == "" || len([]rune(*in.Title)) > 255) {
+		return obj{"productUpdate": obj{"userErrors": []obj{{"field": []string{"title"}}}}}
+	}
 	for i := range s.products {
 		if s.products[i].ID == in.ID {
-			s.products[i].ProductType = in.ProductType
+			if in.ProductType != nil {
+				s.products[i].ProductType = *in.ProductType
+				s.acts["producttype:"+in.ID]++
+			}
+			if in.Title != nil {
+				s.products[i].Title = *in.Title
+				s.acts["title:"+in.ID]++
+			}
+			if in.Status != nil {
+				s.products[i].Status = *in.Status
+				s.acts["status:"+in.ID]++
+			}
 			s.products[i].UpdatedAt = s.bump()
-			s.acts["producttype:"+in.ID]++
 			return obj{"productUpdate": obj{"userErrors": []obj{}}}
 		}
 	}

@@ -51,6 +51,17 @@ const (
 	// and the FIRST collection. collections needs first/last. Verified read-only
 	// against the Admin API 2026-10 (README rows).
 	fCategory = `productType category { name } collections(first: 1) { nodes { title } }`
+	// What the name and status push decide from (ut-docs#5014), read ONCE per op:
+	// the title, the status, updatedAt (the "Shopify edited it later" guard) and
+	// the number of variants (a title is only written to a single-variant
+	// product, whose item name equals the product title). variantsCount is
+	// { count } in the Admin API; README row "variantsCount".
+	fProductState = `title status updatedAt variantsCount { count }`
+	// ProductStatus values (README row "ProductStatus"). Only ACTIVE <-> DRAFT is
+	// ever written; ARCHIVED is never touched.
+	sActive, sDraft, sArchived = "ACTIVE", "DRAFT", "ARCHIVED"
+	// ProductUpdateInput fields written besides productType (title, status).
+	kTitle, kStatus = "title", "status"
 	// The compare-at price of a variant (decimal string or null).
 	fCompareAt = `compareAtPrice`
 	// productUpdate takes product: ProductUpdateInput!; the adapter sets
@@ -59,6 +70,8 @@ const (
 	// no code.
 	mProductType             = `productUpdate(product: $product) { userErrors { field } }`
 	kProductID, kProductType = "id", "productType"
+	// The one productUpdate of an op carries productType, title and status
+	// together (only the ones to change).
 	// Suffix that gives the productType write of one listing.upsert op its own
 	// idempotency key (the price write uses the op id).
 	keyType = ":type"
@@ -96,7 +109,7 @@ const (
 	// item is the VARIANT id, so the product to update comes from here.
 	// productVariant(id:), its product { id } and price (a decimal string) are
 	// written from memory: README row "productVariant(id:)".
-	mVariantLookup = `productVariant(id: $id) { id product { id ` + fCategory + ` } price }`
+	mVariantLookup = `productVariant(id: $id) { id product { id ` + fProductState + ` ` + fCategory + ` } price }`
 	// refundCreate takes the op id as Shopify's own idempotency key too
 	// (ADR-0169 section 3: mandatory on refund mutations).
 	// refund { totalRefundedSet } (Refund.totalRefundedSet, a MoneyBag) is what

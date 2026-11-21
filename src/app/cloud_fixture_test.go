@@ -60,10 +60,11 @@ func TestCapturedCloudUpsertPushesTheVariantPriceAndKeepsTheVariantId(t *testing
 	if e.shop.Price(v) != "6.10" || e.shop.Writes() != w+1 {
 		t.Fatalf("price %q, writes %d -> %d", e.shop.Price(v), w, e.shop.Writes())
 	}
-	// Only content fields count: name, description, status, sku, barcodes.
+	// Only content fields not pushed count: description, sku, barcodes (name and
+	// status are pushed since 0.5.0, ut-docs#5014).
 	n, f := countLogs(e, "listing.fields_ignored")
-	if n != 1 || f["count"] != float64(5) {
-		t.Errorf("fields_ignored logged %d times with %v, want once with count 5", n, f)
+	if n != 1 || f["count"] != float64(3) {
+		t.Errorf("fields_ignored logged %d times with %v, want once with count 3", n, f)
 	}
 	// Re-sending the same bytes is a no-op ack (price already there).
 	w = e.shop.Writes()

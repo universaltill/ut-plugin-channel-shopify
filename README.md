@@ -27,7 +27,7 @@ Everything in this repository is invented data.
 | `channel.fetch.ask` | Re-fetch named orders and submit contract `order` records with **no customer name, address, email or phone**. |
 | `channel.tick` | Sweep orders updated since the `orders.since` cursor (same record), then, only with the ask's cost budget left, a resumable stock sweep: the available quantity of every tracked variant at every location (first 20), submitted as `stock_observed` (the host accepts it in a tick; it feeds "use channel stock as starting count", ADR-0169 section 1.1). At most 3 stock pages (150 levels) per tick, and fewer when orders used the budget, resumed from the `tick.stock.loc` / `tick.stock.after` cursors; after a full pass the next tick starts a new one. Records are deterministic (identity variant@location, version the level's `updatedAt` and quantity), so a repeat pass is a host no-op. A tick whose orders used the budget reads no stock. Each stock page costs 300 points (hint). |
 | `channel.contact.ask` | Fetches an order's contact details live for display; never stored, submitted or logged. |
-| `channel.outbox.ask` | `stock.set` (absolute, compare-and-set on `expect`, inactive levels activated, a stale `expect` reports the shop's value and pulls recent orders), `fulfilment.create` (shipped with carrier and tracking), `order.cancel` and `refund.create` (below), `listing.upsert` (one variant's price and the product's `productType` from the category: the op's external id is the Shopify VARIANT id, as the cloud sends it; the variant is read first, then its own product is updated; a price that already matches is acked without a write; a zero or negative price is refused `invalid_price`, another currency `currency_mismatch`, an unknown variant `not_found`, all non-retryable; other fields are ignored without error and logged once per ask, on success only, as `listing.fields_ignored`; the ack keeps the variant id; an upsert without an external id is a create and is refused with the non-retryable `create_not_supported`, nothing sent). Anything else is dead-lettered with `unsupported_op` and a logged `outbox.unsupported_op`: a delete, and `listing.unpublish` (a product draft is an item push: card ut-docs#4774). Nothing is ever deleted. |
+| `channel.outbox.ask` | `stock.set` (absolute, compare-and-set on `expect`, inactive levels activated, a stale `expect` reports the shop's value and pulls recent orders), `fulfilment.create` (shipped with carrier and tracking), `order.cancel` and `refund.create` (below), `listing.upsert` (one variant's price, the product title and status, and the product's `productType` from the category (see "Name and status sync" below): the op's external id is the Shopify VARIANT id, as the cloud sends it; the variant is read first, then its own product is updated; a price that already matches is acked without a write; a zero or negative price is refused `invalid_price`, another currency `currency_mismatch`, an unknown variant `not_found`, all non-retryable; other fields are ignored without error and logged once per ask, on success only, as `listing.fields_ignored`; the ack keeps the variant id; an upsert without an external id is a create and is refused with the non-retryable `create_not_supported`, nothing sent). `listing.unpublish` sets a single-variant product to DRAFT (never ARCHIVED, never a multi-variant product, never a delete). Anything else is dead-lettered with `unsupported_op` and a logged `outbox.unsupported_op`: a delete. Nothing is ever deleted. |
 
 The plugin has **no account name, no credential and no network of its own**.
 Its only network path is `channel_http` to one URL,
@@ -95,22 +95,54 @@ connection's verified account and adds the access token.
   (`listing.category_rejected`) and does not fail the price push. Sibling
   variants share the product's type (the first push fills it). Changing the
   category of an already-categorised product waits for the cloud to send the
-  category only when it changed (proposal on ut-docs#4942). Title,
-  description, status, sku, barcodes, compare-at and image are ignored (acknowledged as success;
-  `listing.fields_ignored` is logged once per ask, for successes only).
-  The manifest declares `push_fields: ["price"]` (0.4.1, ut-docs#5014), so the
-  cloud hashes a listing only over its price (and `active`): a rename, a
-  description, SKU, barcode, compare-at or category change no longer queues a
-  no-op upsert after each re-read. The category is not declared because its
-  write is fill-only: declaring it would re-queue every item whose Shopify
-  category differs from Universal Till's. A category set in Universal Till on a
-  product that has none in Shopify is therefore filled at the item's next price
-  push, not on its own, and never reaches a product that already has a
-  category in Shopify. Pushes do not move the link's category baseline; the
-  next re-read does. The first sweep after this release re-hashes every
-  listing once and may queue one upsert per published listing.
-  `listing.unpublish` is not done (`unsupported_op`, no mutation). Only the
-  rows of "Verify first on the dev store" marked verified have run against a real store.
+  category only when it changed (proposal on ut-docs#4942).
+
+  **Name and status sync (0.5.0, owner requirement 2026-11-20, ADR-0202,
+  ut-docs#5014).** The manifest declares `push_fields: ["price", "name"]`: the
+  item name syncs both ways and the later change wins. The cloud says which
+  fields of an upsert changed with the additive payload key
+  `changed: {field: {was, at}}` (`was` = the channel's last known value, `at`
+  = when the item's value changed). Rules, all decided from ONE read of the
+  product (a write bumps `updatedAt`):
+  - `changed` absent (an older cloud): the old behaviour, the price only.
+  - `changed` empty: acked with NO Shopify request (a push_fields re-hash
+    queues one upsert per listing; it must cost two host calls, not a read).
+  - Only the fields in `changed` are written: `price` (variant price),
+    `name` (the product title, trimmed, 1 to 255 characters, otherwise the op is
+    refused `invalid_payload` before any request), `active` (see below).
+  - A field is not written when Shopify already has the value, or when
+    Shopify's value differs from `was` AND the product's `updatedAt` is later
+    than `at` (Shopify was edited after the item: the next re-read applies
+    Shopify's value, the later change wins). A missing or unreadable `was` or
+    `at` is never proof, so the write goes ahead.
+  - The title is written to a SINGLE-variant product only: a multi-variant
+    item is named `Title (Blue, M)`, so pushing it would rename the product and
+    every sibling item. Those names are skipped, acked and counted once per ask
+    as `listing.name_skipped_multi_variant` (a limit: a rename of a
+    multi-variant item never reaches Shopify).
+  - Status: `changed.active` with payload `status` `active` sets ACTIVE on a
+    DRAFT product; `listing.unpublish` (or `status` not `active`) sets DRAFT on
+    an ACTIVE one. Never ARCHIVED (untouched), never a multi-variant product,
+    never on an ordinary upsert (a product the merchant drafted is not
+    re-published by a price edit). Title and status go in one `productUpdate`.
+  - A refused `productUpdate` (a `userErrors` answer) never dead-letters a price
+    that was already written (logged `listing.product_update_rejected`); when
+    nothing else was written it is `rejected_by_channel`, so the refusal
+    surfaces instead of a silent ack.
+  Description, sku and barcodes are still ignored (acknowledged as success;
+  `listing.fields_ignored` is logged once per ask, for successes only): not
+  loop-safe yet (Shopify derives the plain-text description from its HTML; the
+  cloud's inbound apply never takes sku or barcodes), follow-up card. The
+  category is not declared because its write is fill-only: declaring it would
+  re-queue every item whose Shopify category differs from Universal Till's. A
+  category set in Universal Till on a product that has none in Shopify is
+  therefore filled at the item's next push, not on its own, and never reaches a
+  product that already has a category in Shopify. Pushes do not move the link's
+  category baseline; the next re-read does. The first sweep after this release
+  re-hashes every listing once and queues one upsert per published listing; with
+  an empty `changed` each costs no Shopify request. Needs the ut-cloud that
+  sends `changed` deployed first; without it the adapter pushes prices only.
+  Only the rows of "Verify first on the dev store" marked verified have run against a real store.
 - **Known limits**: an item the owner published from Universal Till (no
   external id yet) is a create, which the adapter cannot do (ut-docs#4774): it
   is refused with the non-retryable `create_not_supported`, nothing is sent to
@@ -224,6 +256,7 @@ and a test keeps them there. First run on the development store, in this order:
 | *Verified 2026-10-24 (read-only).* `Product.productType` (String), `Product.category { name }` (TaxonomyCategory, an object: a bare `category` is refused) and `collections(first: 1) { nodes { title } }` (needs `first`) are read on import and by the price push; the ONE category is `productType`, else the standard category's name, else the first collection, else none (ut-docs#4944). The dev store's page of 4 products (few variants) had a requested cost of 59; the 700 hint stays the upper bound for 50 variants each | `fCategory`, `gqlCategorised.single` | Import with an empty Category column for products that have a type, a standard category or a collection, or every import failing with a schema error. Check one product with a type, one with only a standard category, one with only collections, one with nothing; and that a product in two collections imports the first only. |
 | *Verified 2026-10-24 (read-only).* `ProductVariant.compareAtPrice` is a decimal string or null | `fCompareAt` | The compare-at price missing on an item that has one in Shopify. |
 | `Location.isActive` (Boolean) and `locations(first: 50) { nodes { id name isActive } }` answer the connect test's `location_list` (`id` = the location gid, `name`, `active`; ut-docs#5008). Needs `read_locations`, which the app holds. The 70 cost hint is an estimate (about 50 points for the connection plus the rest): compare it with the requested cost in the response's `extensions.cost` | `fLocationActive`, `qConnectTest` | The connect test failing with a schema error on `isActive` (then my. shows no location picker and falls back to a typed location id, `not_supported`), or `location_list` empty although the shop has locations (every gid refused by `okGID`), or a location missing although it is active. `locations` leaves deactivated locations out by default (`includeInactive: false`, as the import's `qLocations`), so the list holds active locations only and `active` reads `true`: a deactivated location being absent is expected. Check the dev store's Settings > Locations against the list, and that the requested cost is under 70. |
+| `Product.variantsCount { count }`, `Product.title`, `Product.status` (enum `ACTIVE` / `DRAFT` / `ARCHIVED`) and `Product.updatedAt` read with the variant, and `productUpdate(product:)` with `{id, title}` / `{id, status}` (0.5.0, ut-docs#5014). **From memory, never run against Shopify** | `fProductState`, `sActive`, `sDraft`, `sArchived`, `kTitle`, `kStatus`, `listingUpsert`, `listingUnpublish` | Every price op dead-lettering `rejected_by_channel` with a logged `outbox.graphql_error` after the update (a wrong `variantsCount` shape), or a rename never reaching a single-variant product (count read as 0: names are skipped as multi-variant and `listing.name_skipped_multi_variant` is logged for every one), or Shopify refusing the title (userErrors: `listing.product_update_rejected`). Check `status` accepts `DRAFT`/`ACTIVE` in `productUpdate` on 2026-10 and that `updatedAt` moves when a merchant edits the title in the admin. Run on the dev store before the release is approved. |
 | `productUpdate(product: ProductUpdateInput!)` with `{id, productType}`; its `userErrors` are `UserError` (`field`, `message`, no `code`). **Schema-verified by introspection only; no mutation has been run** | `mProductType`, `kProductType`, `keyType` | Change the category of an imported item in Universal Till and wait for the sweep: failing looks like `rejected_by_channel` with a logged `outbox.graphql_error`, or the product type not changing, or a collection changed (it must never be). Needs `write_products`, which the app holds. Run this on the dev store before a real shop's first category fill. |
 | `Refund.totalRefundedSet { shopMoney { amount currencyCode } }` (a `MoneyBag`) on `refundCreate`'s `refund` is the money that refund moved; `Order.totalRefundedSet` is the order's refunded total (this one already verified on the orders read) | `fTotalRefunded`, `mRefundCreate`, `qRefundState` | Do a refund of one unit on a dev-store order: failing looks like a GraphQL schema error on every `refund.create` (`rejected_by_channel` with a logged `outbox.graphql_error`), or the op acked WITHOUT `refunded_amount_minor` and a `refund.amount_unread` log (answer missing or in another currency). Also refund 5.00 in the admin after queueing an op with `refunded_before_minor` 0 and check a refund above `max_amount_minor - 5.00` is refused `refund_exceeds_ceiling`. With a gateway whose refund stays pending, check what `refund.totalRefundedSet` reads (0 is acked as 0; the next op's cap re-reads the order total, so this is safe, but note it). |
 | `discountAllocations { allocatedAmountSet }` on a line is the COMPLETE list of discounts (the line's own and its share of an order-level code) | `fLineAllocations` | `order.refused.total_mismatch` or `bad_line` for an order with a discount code. Check one order with a line discount and one with a code. |
@@ -248,7 +281,7 @@ and a test keeps them there. First run on the development store, in this order:
 | Lines of a `PARTIALLY_FULFILLED` order cannot be restocked by this adapter | `refundItems` | Staff must refund without restock, or mark the operation done after doing it in the admin. |
 | A refund the cloud queued while the shop had refunded some units itself is refunded for the difference only. **Accepted race:** read, then `suggestedRefund`, then `refundCreate` are separate round trips with no compare-and-set; Shopify caps a refund at the refundable maximum, so the worst case is bounded | `owed` | Over-refund: one more unit refunded than staff intended when staff refund the same line in the admin within the same few seconds. Compare the refund in Shopify with `refunded_to` in the op. |
 | The cloud's ceiling (floor of the discount share, ceiling of the tax) and Shopify's proportional refund agree to the minor unit | `refundTransactions` | A spurious `refund_exceeds_ceiling` dead letter (fail closed, no money moves) on an odd-priced 3-unit line with a discount code. Try exactly that on the dev store; if it happens the cloud ceiling needs a one-unit allowance per line. |
-| `push_fields: ["price"]` stops renames re-queuing upserts (ut-docs#5014; needs ut-cloud with ut-docs#4911 deployed) | `manifest.json` `channel.push_fields` | Rename a published item in Universal Till, run the sweep and a re-read, then the sweep again: an upsert is queued again (failing), or a price change no longer queues exactly one. Then set a category in Universal Till on an item whose Shopify product has none, change its price and sweep: `productType` is filled, and the next re-read plus sweep queues nothing. Expect one upsert per published listing on the first sweep after the release (re-hash), then none. |
+| `push_fields: ["price","name"]` plus the `changed` payload key sync the name both ways without a loop (ut-docs#5014, ADR-0202; needs the ut-cloud that sends `changed`) | `manifest.json` `channel.push_fields`, `listingUpsert` | Rename a single-variant published item in Universal Till, run the sweep: the product title changes once, and a re-read plus the sweep queue nothing. Rename the product in Shopify: the item takes the name, nothing is pushed back. Edit both: the later one wins. A multi-variant item rename stays in Universal Till only (logged `listing.name_skipped_multi_variant`). Mark an item inactive: the product becomes DRAFT (never an ARCHIVED one); activate it again: ACTIVE. Failing looks like a title ping-pong (an upsert queued after every re-read) or a merchant edit overwritten. Then set a category in Universal Till on an item whose Shopify product has none, change its price and sweep: `productType` is filled, and the next re-read plus sweep queues nothing. Expect one upsert per published listing on the first sweep after the release (re-hash), then none. |
 | The requested costs (`Cost:` per query) | `queries.go` | Shopify's `extensions.cost.requestedQueryCost` is above the hand count: raise the hint. |
 
 ## Layout

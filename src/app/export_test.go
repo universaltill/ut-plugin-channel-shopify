@@ -60,6 +60,7 @@ const (
 	FCompareAt       = fCompareAt
 	FLocationActive  = fLocationActive
 	MProductType     = mProductType
+	FProductState    = fProductState
 	DIdempotent      = dIdempotent
 	MOrderCancel     = mOrderCancel
 	MCancelJob       = mCancelJob
@@ -75,3 +76,10 @@ func AccountPattern() string  { return accountRe.String() }
 
 // SpentHTTP is the requests the latest ask counted against its budget.
 func SpentHTTP() int { return spent.http }
+
+// StampAfter reports whether instant a is after b; ok is false when either does not parse.
+func StampAfter(a, b string) (after, ok bool) {
+	x, ok1 := parseStamp(a)
+	y, ok2 := parseStamp(b)
+	return x.after(y), ok1 && ok2
+}

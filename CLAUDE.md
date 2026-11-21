@@ -30,7 +30,7 @@ hand-rolled `//go:wasmimport` lines. It runs only in the ut-cloud channel host
 - **Nothing is ever deleted.** No delete/destroy/remove operation text; the
   mutation allow-list in `security_test.go` is exact (`OrderCancel` and
   `RefundCreate` are the only ones that may name cancel/refund, and only they).
-  `listing.unpublish` is not done (ut-docs#4774). "Already
+  `listing.unpublish` sets a single-variant product to DRAFT, never ARCHIVED. "Already
   done" (fulfilled, cancelled, refunded to the target) is success.
 - **Cancel and refund are READ FIRST, never blind** (`writeback.go`): no
   mutation until the order shows the effect is not there; a refund is the
@@ -43,7 +43,18 @@ hand-rolled `//go:wasmimport` lines. It runs only in the ut-cloud channel host
   a dev-store order** (money, names from memory). Cancel is acked only once the
   order shows cancelled: job polled once, still running = retryable
   `cancel_pending`, ended uncancelled = `cancel_failed`.
-- **`items` is `both`, and the adapter pushes prices only.** The cloud queues
+- **`items` is `both`; `push_fields` is `["price","name"]`** (owner requirement
+  2026-11-20, ADR-0202, ut-docs#5014: the name syncs both ways, the later
+  change wins; `scripts/validate.sh` pins the list). Beyond the price the adapter
+  writes the product title (single-variant products only) and DRAFT/ACTIVE
+  status, driven by the cloud's additive payload key `changed: {field: {was, at}}`
+  (`listingUpsert`): absent = price only (older cloud); empty = ack with no
+  request; only fields in `changed` are written; a field is skipped when Shopify
+  already has it or Shopify's value differs from `was` and `updatedAt` is later
+  than `at`. One read decides every field (a write bumps `updatedAt`). ARCHIVED is
+  never touched; a merchant-drafted product is re-published only when `changed`
+  has `active`. description/sku/barcodes stay ignored: not loop-safe (follow-up
+  card). The cloud queues
   `listing.upsert` only for push/both, so `pull` would leave the variant-price
   push unreachable (ADR-0169 criterion 6; `scripts/validate.sh` pins `both`).
   The op's external id is the Shopify VARIANT id (the cloud's listing id): the

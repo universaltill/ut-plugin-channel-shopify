@@ -62,6 +62,9 @@ var spent struct {
 	http, host, cost int
 	// ignoredLogged: listing.fields_ignored is logged once per ask.
 	ignoredLogged bool
+	// multiVariantSkipped counts the names not pushed because the product has
+	// several variants; logged once at the end of the outbox ask.
+	multiVariantSkipped int
 }
 
 // errOverBudget stops an ask between units of work; the work resumes next ask.
@@ -74,6 +77,7 @@ func budgetedHandlers(h channel.Handlers) channel.Handlers {
 		f := f
 		out[k] = func(ev channel.Event) (any, error) {
 			spent.http, spent.host, spent.cost, spent.ignoredLogged = 0, 0, 0, false
+			spent.multiVariantSkipped = 0
 			pullOrdersAfterDrain = false
 			return f(ev)
 		}
