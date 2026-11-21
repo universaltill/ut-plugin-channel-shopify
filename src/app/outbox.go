@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/universaltill/universal-till/sdk/plugin/channel"
 )
@@ -65,6 +66,9 @@ rounds:
 		if acked == 0 {
 			break
 		}
+	}
+	if spent.multiVariantSkipped > 0 {
+		hostLog(channel.LevelInfo, "listing.name_skipped_multi_variant", map[string]any{"count": spent.multiVariantSkipped})
 	}
 	if pullOrdersAfterDrain {
 		if _, err := pullOrders(); err != nil {
@@ -126,10 +130,10 @@ func perform(op channel.OutboxOp) channel.Ack {
 		return orderCancel(op)
 	case channel.OpRefundCreate:
 		return refundCreate(op)
+	case channel.OpListingUnpublish:
+		return listingUnpublish(op)
 	}
-	// listing.unpublish is NOT done: the adapter cannot set a product to draft
-	// (an item push, ut-docs#4774) although items is "both".
-	// Nothing else is done either; the op is dead-lettered with a logged code.
+	// Nothing else is done; the op is dead-lettered with a logged code.
 	hostLog(channel.LevelWarn, "outbox.unsupported_op", map[string]any{"kind": clip(strings.ToValidUTF8(op.Kind, ""), 40)})
 	return fail("unsupported_op", false)
 }
@@ -463,25 +467,171 @@ func trackingURL(raw string) string {
 	return raw
 }
 
-// listingUpsert pushes the price of an EXISTING variant. The manifest declares
-// items "both" so the cloud queues price edits (ADR-0169 criterion 6). The
-// cloud's external id for an imported item is the Shopify VARIANT id, in
-// op.ExternalID and in variants[0].external_id; the product to update is read
-// from the variant. The record also carries fields this adapter does not push
-// (title, description, category, image, compare-at): ignored, counted once per
-// ask on success only. A create (no external id) is refused for good before any
-// request: the adapter cannot create products (ut-docs#4774). A price in
-// another currency than the shop's is refused, not converted (ADR-0169 section
-// 7); a zero or negative price is refused (a live product must not go free).
-// The ack keeps op.ExternalID (the variant id): the cloud stores it on the
-// listing.
+// changedField is one entry of the cloud's additive payload key
+// changed: {field: {was, at}} (ut-docs#5014): was is the channel's last known
+// value, at when the item's value changed (RFC 3339, absent if unknown).
+type changedField struct {
+	Was json.RawMessage `json:"was"`
+	At  string          `json:"at"`
+}
+
+// shopifyLater is the stale-overwrite guard (design 2d): true only when Shopify
+// provably edited the field AFTER the item did, i.e. its value differs from what
+// the cloud last knew (was) AND the product's updatedAt is later than at. An
+// absent or unreadable was, at or updatedAt is never proof, so the write goes
+// ahead (value-and-time together avoid false skips from updatedAt noise).
+func (c changedField) shopifyLater(differsFromWas bool, updatedAt string) bool {
+	if !differsFromWas {
+		return false
+	}
+	at, ok1 := parseStamp(c.At)
+	upd, ok2 := parseStamp(updatedAt)
+	return ok1 && ok2 && upd.after(at)
+}
+
+const maxTitleRunes = 255
+
+// validTitle is the title to write: trimmed, 1..255 characters, valid UTF-8.
+func validTitle(name string) (string, bool) {
+	t := strings.TrimSpace(name)
+	return t, t != "" && utf8.ValidString(t) && utf8.RuneCountInString(t) <= maxTitleRunes
+}
+
+// productRead is what one read of a variant says about its product.
+type productRead struct {
+	Variant *struct {
+		ID      string `json:"id"`
+		Product *struct {
+			ID            string `json:"id"`
+			Title         string `json:"title"`
+			Status        string `json:"status"`
+			UpdatedAt     string `json:"updatedAt"`
+			VariantsCount *struct {
+				Count int `json:"count"`
+			} `json:"variantsCount"`
+			gqlCategorised
+		} `json:"product"`
+		Price string `json:"price"`
+	} `json:"productVariant"`
+}
+
+// single is true only when the product has exactly one variant: then, and only
+// then, the item name is the product title (channelrecord/listing.go).
+func (r productRead) single() bool {
+	return r.Variant.Product.VariantsCount != nil && r.Variant.Product.VariantsCount.Count == 1
+}
+
+// readVariant is the one read an op decides every field from: a write bumps
+// updatedAt, so deciding after the first write would see "Shopify is newer".
+func readVariant(variant string) (productRead, *channel.Ack) {
+	var cur productRead
+	if err := run(qVariantPrice, map[string]any{"id": variant}, "", &cur); err != nil {
+		a := failFor(err)
+		return cur, &a
+	}
+	if cur.Variant == nil || cur.Variant.Product == nil || cur.Variant.ID != variant || !okGID(tProduct, cur.Variant.Product.ID) {
+		a := fail("not_found", false)
+		return cur, &a
+	}
+	return cur, nil
+}
+
+// wantStatus decides the product status write of an op: DRAFT or ACTIVE, or ""
+// for none. Never ARCHIVED (or any other status) is touched, a multi-variant
+// product keeps its status (one variant's item going inactive is not the
+// product's), and Shopify's own later edit stands.
+func wantStatus(cur productRead, active bool, c changedField) string {
+	pr := cur.Variant.Product
+	want, from := sDraft, sActive
+	if active {
+		want, from = sActive, sDraft
+	}
+	if !cur.single() || pr.Status != from {
+		return ""
+	}
+	var was bool
+	known := json.Unmarshal(c.Was, &was) == nil
+	if known && c.shopifyLater((pr.Status == sActive) != was, pr.UpdatedAt) {
+		hostLog(channel.LevelInfo, "listing.status_skipped_shopify_newer", nil)
+		return ""
+	}
+	return want
+}
+
+// sendProductUpdate writes the fields of one productUpdate. A refusal comes back as ok=false.
+func sendProductUpdate(op channel.OutboxOp, in map[string]any) (ok bool, ack *channel.Ack) {
+	var r struct {
+		Update struct {
+			Errors []userError `json:"userErrors"`
+		} `json:"productUpdate"`
+	}
+	// Absolute values are safe to repeat.
+	if err := run(qProductType, map[string]any{"product": in}, op.ID+keyType, &r); err != nil {
+		a := failFor(err)
+		return false, &a
+	}
+	return len(r.Update.Errors) == 0, nil
+}
+
+// listingUnpublish sets a product to DRAFT when the item went inactive. It never
+// deletes, never touches an ARCHIVED product, and (like the name) only a
+// single-variant product. The external id is the variant id, as for an upsert.
+func listingUnpublish(op channel.OutboxOp) channel.Ack {
+	var p struct {
+		Changed map[string]changedField `json:"changed"`
+	}
+	if !okGID(tVariant, op.ExternalID) || (len(op.Payload) > 0 && json.Unmarshal(op.Payload, &p) != nil) {
+		return fail("invalid_payload", false)
+	}
+	cur, bad := readVariant(op.ExternalID)
+	if bad != nil {
+		return *bad
+	}
+	if st := wantStatus(cur, false, p.Changed["active"]); st != "" {
+		ok, bad := sendProductUpdate(op, map[string]any{kProductID: cur.Variant.Product.ID, kStatus: st})
+		if bad != nil {
+			return *bad
+		}
+		if !ok {
+			hostLog(channel.LevelWarn, "listing.product_update_rejected", nil)
+			return fail("rejected_by_channel", false)
+		}
+	}
+	return channel.Ack{ExternalID: op.ExternalID}
+}
+
+// listingUpsert pushes an EXISTING listing's fields to Shopify. The manifest
+// declares items "both" and push_fields ["price","name"] (ADR-0169 criterion 6;
+// ADR-0202, ut-docs#5014). The cloud's external id for an imported item is the
+// Shopify VARIANT id, in op.ExternalID and in variants[0].external_id; the
+// product to update is read from the variant. The cloud says which fields
+// changed with the additive payload key changed: {field: {was, at}}:
+//   - changed ABSENT (an older cloud): the old behaviour, price only.
+//   - changed present: only the fields in it are written (price, name, active),
+//     each unless Shopify already has the value, or Shopify's value differs from
+//     was and was edited after at (the later change wins; the re-read then
+//     applies Shopify's value to the item).
+//   - changed EMPTY: acked with no Shopify request at all (a push_fields
+//     re-hash queues one upsert per listing; it must cost almost nothing).
+//
+// The name is the product title and is written to a single-variant product only
+// (a multi-variant item is "Title (Blue, M)": writing it would rename every
+// sibling); status is ACTIVE/DRAFT only, ARCHIVED never. A create (no external
+// id) is refused for good before any request: the adapter cannot create
+// products (ut-docs#4774). A price in another currency than the shop's is
+// refused, not converted (ADR-0169 section 7); a zero or negative price is
+// refused (a live product must not go free). The ack keeps op.ExternalID (the
+// variant id): the cloud stores it on the listing.
 func listingUpsert(op channel.OutboxOp) channel.Ack {
 	if op.ExternalID == "" {
 		hostLog(channel.LevelWarn, "listing.create_not_supported", nil)
 		return fail("create_not_supported", false)
 	}
 	var p struct {
-		CategoryPath []string `json:"category_path"`
+		Name         string                  `json:"name"`
+		Status       string                  `json:"status"`
+		CategoryPath []string                `json:"category_path"`
+		Changed      map[string]changedField `json:"changed"` // nil = absent (or null)
 		Variants     []struct {
 			ExternalID string `json:"external_id"`
 			PriceMinor int64  `json:"price_minor"`
@@ -500,63 +650,103 @@ func listingUpsert(op channel.OutboxOp) channel.Ack {
 	if want.PriceMinor > 999_999_999_999 {
 		return fail("invalid_payload", false)
 	}
-	var shop struct {
-		Shop shopInfo `json:"shop"`
+	legacy := p.Changed == nil // an older cloud: price only
+	chPrice, pushPrice := p.Changed["price"]
+	if legacy {
+		pushPrice = true
 	}
-	if err := run(qShopCurrency, nil, "", &shop); err != nil {
-		return failFor(err)
+	chName, pushName := p.Changed["name"]
+	chActive, pushActive := p.Changed["active"]
+	title, titleOK := "", true
+	if pushName {
+		title, titleOK = validTitle(p.Name)
 	}
-	if want.Currency != shop.Shop.Currency {
-		return fail("currency_mismatch", false)
-	}
-	// Tax basis. variants[0].tax_included is the basis the cloud recorded for
-	// this item at import (the shop's taxesIncluded AND the variant taxable) and
-	// the price is in that basis (ut-cloud channelsync/outbound.go build). Only
-	// one mismatch is unambiguous: the cloud says "tax included" but the shop's
-	// prices now EXCLUDE tax (a stale link). Pushing would put a tax-inclusive
-	// number where Shopify adds tax on top, so the customer pays tax twice.
-	// "false" in a tax-included shop is legitimate (a non-taxable variant has
-	// no tax to include, catalogue.go), so it is never refused.
-	if want.TaxIncl && !shop.Shop.TaxesIncluded {
-		return fail("tax_basis_mismatch", false)
-	}
-	var cur struct {
-		Variant *struct {
-			ID      string `json:"id"`
-			Product *struct {
-				ID string `json:"id"`
-				gqlCategorised
-			} `json:"product"`
-			Price string `json:"price"`
-		} `json:"productVariant"`
-	}
-	if err := run(qVariantPrice, map[string]any{"id": op.ExternalID}, "", &cur); err != nil {
-		return failFor(err)
-	}
-	if cur.Variant == nil || cur.Variant.Product == nil || cur.Variant.ID != op.ExternalID || !okGID(tProduct, cur.Variant.Product.ID) {
-		return fail("not_found", false)
-	}
-	// The item's ONE category goes to Shopify as productType and nothing else
+	// The ONE category goes to Shopify as productType and nothing else
 	// (ut-docs#4944; collections and the standard category are never edited).
 	// The leaf of the path is the category; an empty path writes nothing.
 	wantType := ""
 	if n := len(p.CategoryPath); n > 0 {
 		wantType = categoryName(p.CategoryPath[n-1])
 	}
+	if !pushPrice && !pushName && !pushActive {
+		logFieldsIgnored(op)
+		return channel.Ack{ExternalID: op.ExternalID} // nothing of ours changed (an empty changed): no request
+	}
+	if pushPrice {
+		var shop struct {
+			Shop shopInfo `json:"shop"`
+		}
+		if err := run(qShopCurrency, nil, "", &shop); err != nil {
+			return failFor(err)
+		}
+		if want.Currency != shop.Shop.Currency {
+			return fail("currency_mismatch", false)
+		}
+		// Tax basis. variants[0].tax_included is the basis the cloud recorded for
+		// this item at import (the shop's taxesIncluded AND the variant taxable) and
+		// the price is in that basis (ut-cloud channelsync/outbound.go build). Only
+		// one mismatch is unambiguous: the cloud says "tax included" but the shop's
+		// prices now EXCLUDE tax (a stale link). Pushing would put a tax-inclusive
+		// number where Shopify adds tax on top, so the customer pays tax twice.
+		// "false" in a tax-included shop is legitimate (a non-taxable variant has
+		// no tax to include, catalogue.go), so it is never refused.
+		if want.TaxIncl && !shop.Shop.TaxesIncluded {
+			return fail("tax_basis_mismatch", false)
+		}
+	}
+	cur, bad := readVariant(op.ExternalID)
+	if bad != nil {
+		return *bad
+	}
+	pr := cur.Variant.Product
 	// Written ONLY to a product that has no category at all in Shopify (no type,
 	// no standard category, no collection): the cloud sends category_path
-	// whenever the item's category differs from the link baseline, and with
-	// push_fields ["price"] an ack never moves that baseline (ut-docs#5014), so
-	// a rule that overwrote would undo a merchant's own change at the next
-	// price edit. Changing an existing category needs the cloud to
-	// send it only when the item's category changed (proposal on ut-docs#4942).
-	writeType := wantType != "" && cur.Variant.Product.single() == ""
-	now, ok := parseMoney(cur.Variant.Price, want.Currency)
-	if ok && now == want.PriceMinor && !writeType {
+	// whenever the item's category differs from the link baseline, and category_path
+	// is not in push_fields, so an ack never moves that baseline (ut-docs#5014); a
+	// rule that overwrote would undo a merchant's own change at the next edit.
+	writeType := wantType != "" && pr.single() == ""
+	now, priceOK := parseMoney(cur.Variant.Price, want.Currency)
+	writePrice := pushPrice && (!priceOK || now != want.PriceMinor)
+	if writePrice && !legacy {
+		var was int64
+		if json.Unmarshal(chPrice.Was, &was) == nil && chPrice.shopifyLater(priceOK && now != was, pr.UpdatedAt) {
+			hostLog(channel.LevelInfo, "listing.price_skipped_shopify_newer", nil)
+			writePrice = false
+		}
+	}
+	in := map[string]any{kProductID: pr.ID}
+	if writeType {
+		in[kProductType] = wantType
+	}
+	if pushName {
+		switch {
+		case !cur.single():
+			// Never written, so its (derived) name is not validated either.
+			spent.multiVariantSkipped++
+		case !titleOK:
+			// A single-variant title the adapter cannot write (empty, over 255
+			// characters): refused before any write, the price included.
+			return fail("invalid_payload", false)
+		case title == strings.TrimSpace(pr.Title):
+		default:
+			var was string
+			if json.Unmarshal(chName.Was, &was) == nil && chName.shopifyLater(strings.TrimSpace(pr.Title) != strings.TrimSpace(was), pr.UpdatedAt) {
+				hostLog(channel.LevelInfo, "listing.name_skipped_shopify_newer", nil)
+			} else {
+				in[kTitle] = title
+			}
+		}
+	}
+	if pushActive && p.Status != "" {
+		if st := wantStatus(cur, p.Status == "active", chActive); st != "" {
+			in[kStatus] = st
+		}
+	}
+	if !writePrice && len(in) == 1 {
 		logFieldsIgnored(op)
 		return channel.Ack{ExternalID: op.ExternalID} // already there: no write
 	}
-	if !ok || now != want.PriceMinor {
+	if writePrice {
 		var r struct {
 			Update struct {
 				Errors []userError `json:"userErrors"`
@@ -564,7 +754,7 @@ func listingUpsert(op channel.OutboxOp) channel.Ack {
 		}
 		inputs := []map[string]any{{"id": op.ExternalID, "price": formatMoney(want.PriceMinor, want.Currency)}}
 		// An absolute price is safe to repeat, so the host may re-send it.
-		if err := run(qVariantPrices, map[string]any{"productId": cur.Variant.Product.ID, "variants": inputs}, op.ID, &r); err != nil {
+		if err := run(qVariantPrices, map[string]any{"productId": pr.ID, "variants": inputs}, op.ID, &r); err != nil {
 			return failFor(err)
 		}
 		switch code := userErrCode(r.Update.Errors); {
@@ -575,20 +765,25 @@ func listingUpsert(op channel.OutboxOp) channel.Ack {
 			return fail("rejected_by_channel", false)
 		}
 	}
-	if writeType {
-		var r struct {
-			Update struct {
-				Errors []userError `json:"userErrors"`
-			} `json:"productUpdate"`
+	if len(in) > 1 {
+		ok, bad := sendProductUpdate(op, in)
+		if bad != nil {
+			return *bad
 		}
-		in := map[string]any{kProductID: cur.Variant.Product.ID, kProductType: wantType}
-		// An absolute type is safe to repeat.
-		if err := run(qProductType, map[string]any{"product": in}, op.ID+keyType, &r); err != nil {
-			return failFor(err)
-		}
-		if len(r.Update.Errors) > 0 {
-			// The price is already written and acked: a refused category must not
-			// dead-letter it (nor every later price edit of the item). Logged, no text.
+		_, hasTitle := in[kTitle]
+		_, hasStatus := in[kStatus]
+		switch {
+		case ok:
+		case (hasTitle || hasStatus) && !writePrice:
+			// Nothing was written: a silent ack would move the baseline to a value
+			// Shopify never took. Surface the refusal instead.
+			hostLog(channel.LevelWarn, "listing.product_update_rejected", nil)
+			return fail("rejected_by_channel", false)
+		case hasTitle || hasStatus:
+			// The price is already written and acked: a refused title or status
+			// must not dead-letter it. Logged, no text.
+			hostLog(channel.LevelWarn, "listing.product_update_rejected", nil)
+		default:
 			hostLog(channel.LevelWarn, "listing.category_rejected", nil)
 		}
 	}
@@ -600,7 +795,7 @@ func listingUpsert(op channel.OutboxOp) channel.Ack {
 // these are counted: structural keys (cloud_id, external_id, variants,
 // currency, price_minor, tax_included) are not fields the owner edited.
 var (
-	ignoredTop     = []string{"name", "description", "status", "category", "images", "image", "tags"}
+	ignoredTop     = []string{"description", "category", "images", "image", "tags"}
 	ignoredVariant = []string{"sku", "barcodes", "compare_at_minor"}
 )
 

@@ -466,7 +466,7 @@ func TestTheQueriesAskForOneMoreThanTheCapsTheyEnforce(t *testing.T) {
 // used from there: a correction after the dev-store run is one line.
 func TestFromMemoryShopifyNamesLiveInOnePlace(t *testing.T) {
 	all := strings.Join(app.AllQueries(), "\n")
-	for _, n := range []string{app.FLineAllocations, app.FOrderTax, app.FShippingLines, app.DIdempotent, app.FFOLocation, app.MOrderCancel, app.MCancelJob, app.MRefundCreate, app.FSuggestedRefund, app.FOrderRefunds, app.FTotalRefunded, app.FCategory, app.FCompareAt, app.MProductType, app.FLocationActive} {
+	for _, n := range []string{app.FLineAllocations, app.FOrderTax, app.FShippingLines, app.DIdempotent, app.FFOLocation, app.MOrderCancel, app.MCancelJob, app.MRefundCreate, app.FSuggestedRefund, app.FOrderRefunds, app.FTotalRefunded, app.FCategory, app.FCompareAt, app.MProductType, app.FProductState, app.FLocationActive} {
 		if !strings.Contains(all, n) {
 			t.Errorf("%q is not in the query texts", n)
 		}
@@ -481,6 +481,16 @@ func TestFromMemoryShopifyNamesLiveInOnePlace(t *testing.T) {
 			`"staffNote"`, `"notifyCustomer"`, `"CUSTOMER"`, `"INVENTORY"`, `"NO_RESTOCK"`, `"RETURN"`, `"CANCEL"`, `"PARTIALLY_FULFILLED"`, `"UNFULFILLED"`} {
 			if strings.Contains(string(b), lit) {
 				t.Errorf("%s spells the from-memory name %s itself: use the constant in queries.go", f, lit)
+			}
+		}
+	}
+	// The status values the push writes (ut-docs#5014) are constants too.
+	if b, err := os.ReadFile("../../src/app/outbox.go"); err != nil {
+		t.Fatal(err)
+	} else {
+		for _, lit := range []string{`"ACTIVE"`, `"DRAFT"`, `"ARCHIVED"`} {
+			if strings.Contains(string(b), lit) {
+				t.Errorf("outbox.go spells the ProductStatus value %s itself: use the constant in queries.go", lit)
 			}
 		}
 	}

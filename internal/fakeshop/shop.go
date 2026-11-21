@@ -563,6 +563,42 @@ func (s *Shop) SetCategory(productID, productType, taxonomy string, collections 
 	s.mu.Unlock()
 }
 
+// SetTitle changes a product's title as if the merchant did it in Shopify's admin.
+func (s *Shop) SetTitle(productID, title string) {
+	s.mu.Lock()
+	for i := range s.products {
+		if s.products[i].ID == productID {
+			s.products[i].Title = title
+			s.products[i].UpdatedAt = s.bump()
+		}
+	}
+	s.mu.Unlock()
+}
+
+// SetStatus changes a product's status as if the merchant did it in Shopify's admin.
+func (s *Shop) SetStatus(productID, status string) {
+	s.mu.Lock()
+	for i := range s.products {
+		if s.products[i].ID == productID {
+			s.products[i].Status = status
+			s.products[i].UpdatedAt = s.bump()
+		}
+	}
+	s.mu.Unlock()
+}
+
+// Title is a product's title as the shop holds it.
+func (s *Shop) Title(productID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.products {
+		if p.ID == productID {
+			return p.Title
+		}
+	}
+	return ""
+}
+
 // RefuseProductType makes productUpdate answer a userError.
 func (s *Shop) RefuseProductType(on bool) {
 	s.mu.Lock()

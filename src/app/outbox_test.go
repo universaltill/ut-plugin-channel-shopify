@@ -447,28 +447,6 @@ func TestCreateUpsertIsRefusedNonRetryablyAndSendsNothing(t *testing.T) {
 	}
 }
 
-// listing.unpublish is not done (a draft is an item push, ut-docs#4774) even
-// though items is "both", so it is never acted on.
-func TestUnpublishIsNotActedOnAndIsDeadLetteredWithALoggedCode(t *testing.T) {
-	e := newEnv(t, fakeshop.Options{})
-	p := e.shop.ProductIDs()[0]
-	status := e.shop.Status(p)
-	a := e.outbox(channel.OutboxOp{ID: "op-1", Kind: channel.OpListingUnpublish, ExternalID: p})["op-1"]
-	if a.Error == nil || a.Error.Retryable || a.Error.Code != "unsupported_op" {
-		t.Fatalf("%+v", a)
-	}
-	if len(e.shop.Requests()) != 0 || e.shop.Status(p) != status {
-		t.Fatalf("unpublish touched the shop: %d requests, status %q", len(e.shop.Requests()), e.shop.Status(p))
-	}
-	logged := false
-	for _, l := range e.em.Host.Logs {
-		logged = logged || l.Code == "outbox.unsupported_op"
-	}
-	if !logged {
-		t.Error("the dead-lettered op left no log code")
-	}
-}
-
 func TestUnsupportedOperationsAreDeadLetteredWithoutARequest(t *testing.T) {
 	e := newEnv(t, fakeshop.Options{})
 	var ops []channel.OutboxOp

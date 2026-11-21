@@ -55,11 +55,15 @@ cap = c.get("capabilities") or {}
 # The adapter pushes the price of an EXISTING product only: it ignores other fields (listing.fields_ignored) and refuses a
 # create with create_not_supported (ut-docs#4774 adds creation). Pinned in src/app TestCreateUpsertIsRefused*.
 if cap.get("items") != "both": errs.append("capabilities.items must be 'both': the cloud queues price edits only for push/both (the adapter refuses creates, ignores other fields)")
-# push_fields MUST be exactly ["price"] (ut-docs#5014): the cloud hashes a listing only over these fields, and the
-# adapter pushes only the variant price. The productType write is fill-only (a product with no category in Shopify),
-# so declaring category_path would re-queue an upsert after every re-read for each item whose Shopify category differs
-# from Universal Till's, which the adapter by design never overwrites. compare_at is never pushed (ut-docs#4774).
-if c.get("push_fields") != ["price"]: errs.append('channel.push_fields must be ["price"]: the adapter pushes only the variant price (category is fill-only), so any other field re-queues no-op upserts')
+# push_fields MUST be exactly ["price","name"]. Reason (owner requirement 2026-11-20, ut-docs#5014, ADR-0202): the item name
+# syncs both ways, the later change wins. The cloud hashes a listing only over these fields (plus active), and the adapter
+# pushes the variant price and the product title (single-variant products only). Echo suppression: per-field change
+# timestamps in the cloud (a stale write is skipped by the adapter's changed {was, at} guard) plus a hash of the pushed
+# fields (an inbound apply stores the channel's own hash, so a Shopify-side rename never queues a push back). description,
+# sku and barcodes stay OUT: not loop-safe yet (Shopify derives the plain-text description from HTML, inbound never applies
+# sku/barcodes; follow-up card). category_path stays out (the productType write is fill-only: declaring it would re-queue an
+# upsert after every re-read for each item whose Shopify category differs). compare_at is never pushed (ut-docs#4774).
+if c.get("push_fields") != ["price", "name"]: errs.append('channel.push_fields must be ["price","name"]: the adapter pushes the variant price and the title only (description, sku, barcodes are not loop-safe yet; category is fill-only), so any other list re-queues no-op upserts or loops')
 if cap.get("variants") not in ("pull", "both"): errs.append("capabilities.variants is 'pull' or 'both' (price push to existing variants only)")
 # The adapter does order.cancel and refund.create (ut-docs#4774): without push the cloud never queues them.
 for k in ("fulfilment", "cancel", "refunds"):
