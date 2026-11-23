@@ -74,13 +74,56 @@ func realAPIRefusal(req gqlRequest) (msg, code string) {
 		if json.Unmarshal(req.Variables["product"], &in) == nil {
 			for k, raw := range in {
 				switch k {
-				case "id", "productType", "title", "status":
+				case "id", "productType", "title", "status", "descriptionHtml":
 					var sv string
 					if json.Unmarshal(raw, &sv) != nil {
 						return "Variable $product of type ProductUpdateInput! was provided invalid value for " + k + " (Could not coerce value to String)", "INVALID_VARIABLE"
 					}
 				default:
-					return "Variable $product of type ProductUpdateInput! was provided invalid value for " + k + " (the adapter only ever sets productType, title and status)", "INVALID_VARIABLE"
+					return "Variable $product of type ProductUpdateInput! was provided invalid value for " + k + " (the adapter only ever sets productType, title, status and descriptionHtml)", "INVALID_VARIABLE"
+				}
+			}
+		}
+	}
+	if strings.Contains(q, "productVariantsBulkUpdate(") {
+		// ProductVariantsBulkInput: the SKU lives under inventoryItem, not at the top.
+		var in []map[string]json.RawMessage
+		if json.Unmarshal(req.Variables["variants"], &in) == nil {
+			for _, v := range in {
+				for k := range v {
+					switch k {
+					case "id", "price", "barcode", "inventoryItem":
+					default:
+						return "Variable $variants of type [ProductVariantsBulkInput!]! was provided invalid value for " + k + " (Field is not defined on ProductVariantsBulkInput)", "INVALID_VARIABLE"
+					}
+				}
+			}
+		}
+	}
+	if strings.Contains(q, "productCreateMedia(") {
+		// CreateMediaInput: originalSource, alt, mediaContentType; the payload has mediaUserErrors.
+		var in []map[string]json.RawMessage
+		if json.Unmarshal(req.Variables["media"], &in) == nil {
+			for _, m := range in {
+				for k := range m {
+					switch k {
+					case "originalSource", "alt", "mediaContentType":
+					default:
+						return "Variable $media of type [CreateMediaInput!]! was provided invalid value for " + k + " (Field is not defined on CreateMediaInput)", "INVALID_VARIABLE"
+					}
+				}
+			}
+		}
+	}
+	if strings.Contains(q, "productReorderMedia(") {
+		var in []map[string]json.RawMessage
+		if json.Unmarshal(req.Variables["moves"], &in) == nil {
+			for _, m := range in {
+				for k, raw := range m {
+					var sv string
+					if (k != "id" && k != "newPosition") || json.Unmarshal(raw, &sv) != nil {
+						return "Variable $moves of type [MoveInput!]! was provided invalid value for " + k + " (MoveInput takes id and newPosition as strings)", "INVALID_VARIABLE"
+					}
 				}
 			}
 		}

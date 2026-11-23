@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/universaltill/universal-till/sdk/plugin/channel"
 )
@@ -84,6 +85,12 @@ type gqlProduct struct {
 	Status      string      `json:"status"`
 	UpdatedAt   string      `json:"updatedAt"`
 	Variants    gqlVariants `json:"variants"`
+	Featured    *struct {
+		ID    string `json:"id"`
+		Image *struct {
+			URL string `json:"url"`
+		} `json:"image"`
+	} `json:"featuredMedia"`
 }
 
 type shopInfo struct {
@@ -211,7 +218,11 @@ func mapProduct(p *gqlProduct, shop shopInfo) (channel.Listing, string) {
 	}
 	l := channel.Listing{
 		Identity: channel.Identity{ExternalID: p.ID, ExternalVersion: p.UpdatedAt},
-		Title:    clip(p.Title, 255), Description: clip(p.Description, 5000), Status: listingStatus(p.Status),
+		Title:    clip(p.Title, 255), Description: clip(NormalizeText(p.Description), 5000), Status: listingStatus(p.Status),
+	}
+	// The first image only (ADR-0212): the cloud downloads and hashes it itself.
+	if f := p.Featured; f != nil && f.Image != nil && okImageURL(f.Image.URL) && f.ID != "" {
+		l.Images = []channel.Image{{ExternalID: f.ID, URL: f.Image.URL, Position: 1}}
 	}
 	if c := p.single(); c != "" {
 		l.CategoryPath = []string{c}
@@ -222,7 +233,7 @@ func mapProduct(p *gqlProduct, shop shopInfo) (channel.Listing, string) {
 			return channel.Listing{}, "bad_variant"
 		}
 		out := channel.Variant{
-			ExternalID: v.ID, SKU: clip(v.SKU, 100), PriceMinor: price, Currency: shop.Currency,
+			ExternalID: v.ID, SKU: clip(strings.TrimSpace(v.SKU), 100), PriceMinor: price, Currency: shop.Currency,
 			TaxIncluded: shop.TaxesIncluded && v.Taxable, Tracked: v.InventoryItem.Tracked,
 		}
 		if v.CompareAtPrice != nil {
@@ -230,8 +241,8 @@ func mapProduct(p *gqlProduct, shop shopInfo) (channel.Listing, string) {
 				out.CompareAtMinor = c
 			}
 		}
-		if v.Barcode != "" {
-			out.Barcodes = []string{clip(v.Barcode, 64)}
+		if strings.TrimSpace(v.Barcode) != "" {
+			out.Barcodes = []string{clip(strings.TrimSpace(v.Barcode), 64)}
 		}
 		opts := map[string]string{}
 		for _, o := range v.SelectedOptions {

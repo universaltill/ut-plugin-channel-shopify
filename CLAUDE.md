@@ -43,7 +43,16 @@ hand-rolled `//go:wasmimport` lines. It runs only in the ut-cloud channel host
   a dev-store order** (money, names from memory). Cancel is acked only once the
   order shows cancelled: job polled once, still running = retryable
   `cancel_pending`, ended uncancelled = `cancel_failed`.
-- **`items` is `both`; `push_fields` is `["price","name"]`** (owner requirement
+- **Images (0.7.0, ADR-0212, ut-docs#6843 S5).** `image.upsert` `{cloud_id, external_id, sha256,
+  content_type, fetch_url, alt?}`: the plugin hands the cloud's signed `fetch_url` to
+  `productCreateMedia(originalSource)` and never sees bytes; only Shopify fetches it, so no egress
+  host is added. The URL is never logged or put in an ack. The sha256 of the last pushed image is
+  kept in the product metafield `unitill.image_sha256`; same sha and a first media that has not
+  FAILED = skip (acked with that media id). Otherwise create the media, store the sha, move it to
+  position 0. Old media are never deleted. Bad payload = `invalid_payload`; a payload without any
+  image key (old shape) or another kind = `unsupported_op`. Import reads `featuredMedia` as
+  `images[0]` (https URL only); the cloud downloads and hashes it.
+- **`items` is `both`; `push_fields` is `["price","name","description","sku","barcodes","image"]`** (image added in 0.7.0, ADR-0212; description/sku/barcodes 0.6.0, ut-docs#6843, ADR-0202 amendment 2026-11-23) (owner requirement
   2026-11-20, ADR-0202, ut-docs#5014: the name syncs both ways, the later
   change wins; `scripts/validate.sh` pins the list). Beyond the price the adapter
   writes the product title (single-variant products only) and DRAFT/ACTIVE
@@ -53,8 +62,11 @@ hand-rolled `//go:wasmimport` lines. It runs only in the ut-cloud channel host
   already has it or Shopify's value differs from `was` and `updatedAt` is later
   than `at`. One read decides every field (a write bumps `updatedAt`). ARCHIVED is
   never touched; a merchant-drafted product is re-published only when `changed`
-  has `active`. description/sku/barcodes stay ignored: not loop-safe (follow-up
-  card). The cloud queues
+  has `active`. description (escaped `<p>` paragraphs via `descriptionHtml`, compared on
+  `NormalizeText`), the variant sku (`inventoryItem.sku`) and the FIRST barcode are
+  written the same way (only when in `changed`, never cleared by an empty value,
+  never over a later Shopify edit, no request when Shopify already holds the
+  value); an op from an older cloud (no `changed`) writes none of them. The cloud queues
   `listing.upsert` only for push/both, so `pull` would leave the variant-price
   push unreachable (ADR-0169 criterion 6; `scripts/validate.sh` pins `both`).
   The op's external id is the Shopify VARIANT id (the cloud's listing id): the

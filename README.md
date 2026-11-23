@@ -97,6 +97,30 @@ connection's verified account and adds the access token.
   category of an already-categorised product waits for the cloud to send the
   category only when it changed (proposal on ut-docs#4942).
 
+  **Image sync (0.7.0, ADR-0212, ut-docs#6843 S5).** `push_fields` is now
+  `["price","name","description","sku","barcodes","image"]`. `image.upsert` passes the cloud's
+  signed, at most 15 minute `fetch_url` to Shopify as `productCreateMedia` `originalSource`
+  (Shopify fetches; the plugin never gets bytes; no egress host added; the URL is never logged).
+  The pushed sha256 is stored in the product metafield `unitill.image_sha256`; an identical sha
+  with a live first media is skipped, a different one adds the new image first (old media are never
+  deleted). A media Shopify marked FAILED is pushed again. Import sends the product's first image
+  URL (`featuredMedia`) as `images[0]`; the cloud fetches and hashes it.
+
+  **Description, SKU and barcode sync (0.6.0, ut-docs#6843, ADR-0202 amendment
+  2026-11-23).** `push_fields` is now `["price","name","description","sku","barcodes"]`.
+  Same `changed` rules as the name (only named fields, skipped when Shopify
+  already holds the value or edited it later than `at`, nothing from an older
+  cloud). `description`: the item text is written as escaped `<p>` paragraphs
+  (one per line; `&`, `<`, `>` escaped, no item markup) through
+  `productUpdate` `descriptionHtml`; both sides are compared on `NormalizeText`
+  (tags stripped, entities decoded, whitespace collapsed), so merchant
+  formatting survives. `sku` goes to `inventoryItem.sku` and `barcodes` to
+  `barcode` of `productVariantsBulkUpdate`, with the price in one request;
+  Shopify has one barcode, so only the item's FIRST is used. An empty wanted
+  value never clears a Shopify value; a SKU or barcode over 255 characters or a
+  description over 5,000 refuses the op `invalid_payload` before any request.
+  Import reads sku, barcode (trimmed) and description (plain text, normalised).
+
   **Name and status sync (0.5.0, owner requirement 2026-11-20, ADR-0202,
   ut-docs#5014).** The manifest declares `push_fields: ["price", "name"]`: the
   item name syncs both ways and the later change wins. The cloud says which
@@ -281,6 +305,8 @@ and a test keeps them there. First run on the development store, in this order:
 | Lines of a `PARTIALLY_FULFILLED` order cannot be restocked by this adapter | `refundItems` | Staff must refund without restock, or mark the operation done after doing it in the admin. |
 | A refund the cloud queued while the shop had refunded some units itself is refunded for the difference only. **Accepted race:** read, then `suggestedRefund`, then `refundCreate` are separate round trips with no compare-and-set; Shopify caps a refund at the refundable maximum, so the worst case is bounded | `owed` | Over-refund: one more unit refunded than staff intended when staff refund the same line in the admin within the same few seconds. Compare the refund in Shopify with `refunded_to` in the op. |
 | The cloud's ceiling (floor of the discount share, ceiling of the tax) and Shopify's proportional refund agree to the minor unit | `refundTransactions` | A spurious `refund_exceeds_ceiling` dead letter (fail closed, no money moves) on an odd-priced 3-unit line with a discount code. Try exactly that on the dev store; if it happens the cloud ceiling needs a one-unit allowance per line. |
+| Description, SKU and barcode push (0.6.0, ut-docs#6843): `Product.description` read with the variant, `descriptionHtml` in `productUpdate(product:)`, `barcode` and `inventoryItem { sku }` in `ProductVariantsBulkInput`. **From memory, never run against Shopify** | `mVariantLookup`, `kDescriptionHTML`, `listingUpsert` | `rejected_by_channel` on a field push (wrong input name), a description rewritten after every re-read (plain-text vs HTML compare drift), or a SKU not changing. On the dev store: edit description, SKU and barcode in Universal Till, sweep: all three land once and the next re-read plus sweep queues nothing; edit them in Shopify: the item takes them. Run before the release is approved. |
+| Image push (0.7.0, ADR-0212): `productCreateMedia(productId:, media: [{originalSource, alt, mediaContentType: IMAGE}])` (**deprecated by Shopify in favour of productUpdate/productSet, but still present**), `productReorderMedia(id:, moves: [{id, newPosition: "0"}])`, `metafieldsSet` of `unitill.image_sha256` (`single_line_text_field`), `Product.media(first:1){nodes{id status}}`, `featuredMedia { ... on MediaImage { image { url } } }`. Names checked against shopify.dev docs 2026-11-23, never run against Shopify | `qProductImage`, `qProductCreateMedia`, `qProductReorderMedia`, `qMetafieldsSet`, `fFeatured` | Set a photo in Universal Till, sweep: it appears first on the product (status moves UPLOADED to READY) and a second sweep adds nothing. Change the photo: the new one is first, the old one stays. Failing looks like `rejected_by_channel` on `image.upsert`, the image not first, or a duplicate on every sweep (metafield not stored: the manifest needs no extra scope for a product metafield, unverified). Check Shopify can reach the signed URL (it must be public HTTPS). |
 | `push_fields: ["price","name"]` plus the `changed` payload key sync the name both ways without a loop (ut-docs#5014, ADR-0202; needs the ut-cloud that sends `changed`) | `manifest.json` `channel.push_fields`, `listingUpsert` | Rename a single-variant published item in Universal Till, run the sweep: the product title changes once, and a re-read plus the sweep queue nothing. Rename the product in Shopify: the item takes the name, nothing is pushed back. Edit both: the later one wins. A multi-variant item rename stays in Universal Till only (logged `listing.name_skipped_multi_variant`). Mark an item inactive: the product becomes DRAFT (never an ARCHIVED one); activate it again: ACTIVE. Failing looks like a title ping-pong (an upsert queued after every re-read) or a merchant edit overwritten. Then set a category in Universal Till on an item whose Shopify product has none, change its price and sweep: `productType` is filled, and the next re-read plus sweep queues nothing. Expect one upsert per published listing on the first sweep after the release (re-hash), then none. |
 | The requested costs (`Cost:` per query) | `queries.go` | Shopify's `extensions.cost.requestedQueryCost` is above the hand count: raise the hint. |
 
