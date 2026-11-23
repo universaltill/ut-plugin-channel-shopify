@@ -119,7 +119,7 @@ connection's verified account and adds the access token.
   Shopify has one barcode, so only the item's FIRST is used. An empty wanted
   value never clears a Shopify value; a SKU or barcode over 255 characters or a
   description over 5,000 refuses the op `invalid_payload` before any request.
-  Import reads sku, barcode (trimmed) and description (plain text, normalised).
+  Import reads sku, barcode (trimmed) and description (read as `descriptionHtml` and normalised: Shopify's plain `Product.description` glues paragraphs together, "<p>a</p><p>b</p>" reads "ab", which made every two-paragraph description read back changed; 0.7.1).
 
   **Name and status sync (0.5.0, owner requirement 2026-11-20, ADR-0202,
   ut-docs#5014).** The manifest declares `push_fields: ["price", "name"]`: the
@@ -369,3 +369,5 @@ CI only. Every token and secret in the tests is an invented constant. Never
 point a test at a real shop.
 
 MIT licensed, see `LICENSE`.
+
+**Verified live 2026-11-23 (0.7.1, ut-docs#6843, dev store, API 2026-10).** The real adapter, driven through the conformance emulator with the shop side on the dev store, wrote and read back title, price, `descriptionHtml` (escaped `<p>`), `inventoryItem.sku`, `barcode`, and `productCreateMedia` + `metafieldsSet` + `productReorderMedia` (media READY, primary at position 0, a repeat of the same sha adds no media, a media that FAILED is repaired by the next push); a repeated identical `listing.upsert` sends no mutation; the import returned the values edited in Shopify. Every input name was accepted by Shopify (no rejected shape). One defect found and fixed: the plain-text `Product.description` glued paragraphs.

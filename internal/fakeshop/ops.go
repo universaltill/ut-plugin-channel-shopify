@@ -176,7 +176,7 @@ func (s *Shop) dispatch(req gqlRequest) (any, string) {
 			case "noproduct": // a variant whose product is gone
 				return obj{"productVariant": obj{"id": v.ID, "product": nil, "price": v.Price}}, ""
 			}
-			return obj{"productVariant": obj{"id": v.ID, "sku": v.SKU, "barcode": nullIfEmpty(v.Barcode), "product": obj{"id": pr.ID, "description": pr.Desc, "title": pr.Title, "status": pr.Status, "updatedAt": pr.UpdatedAt, "variantsCount": obj{"count": len(pr.Variants)},
+			return obj{"productVariant": obj{"id": v.ID, "sku": v.SKU, "barcode": nullIfEmpty(v.Barcode), "product": obj{"id": pr.ID, "description": pr.Desc, "descriptionHtml": htmlOf(*pr), "title": pr.Title, "status": pr.Status, "updatedAt": pr.UpdatedAt, "variantsCount": obj{"count": len(pr.Variants)},
 				"productType": pr.ProductType, "category": taxonomyJSON(*pr), "collections": collectionsJSON(*pr)}, "price": v.Price}}, ""
 		}
 		return obj{"productVariant": nil}, ""
@@ -269,7 +269,7 @@ func (s *Shop) opProducts(req gqlRequest) obj {
 		if s.h.foreign {
 			id = "gid://shopify/Product/../../admin"
 		}
-		nodes = append(nodes, obj{"id": id, "title": title, "description": p.Desc, "status": p.Status, "updatedAt": p.UpdatedAt,
+		nodes = append(nodes, obj{"id": id, "title": title, "description": p.Desc, "descriptionHtml": htmlOf(p), "status": p.Status, "updatedAt": p.UpdatedAt,
 			"productType": p.ProductType, "category": taxonomyJSON(p), "collections": collectionsJSON(p), "featuredMedia": featuredJSON(p),
 			"variants": s.variantPage(p, s.num(req, "vfirst", 50), "")})
 	}
@@ -822,14 +822,22 @@ func (s *Shop) opProductType(req gqlRequest) obj {
 	return obj{"productUpdate": obj{"userErrors": []obj{{"field": []string{"id"}}}}}
 }
 
-var tagRe = regexp.MustCompile(`</p>\s*`)
-
-// htmlToPlain is what Shopify's Product.description gives for descriptionHtml:
-// plain text, paragraphs on their own lines, entities decoded.
+// htmlToPlain is what Shopify's Product.description gives for descriptionHtml,
+// as observed on the dev store 2026-11-23 (ut-docs#6843): every tag is removed
+// with NOTHING in its place, so "<p>a</p><p>b</p>" reads "ab"; entities are
+// decoded. The adapter therefore reads descriptionHtml, never this.
 func htmlToPlain(h string) string {
-	h = strings.TrimSpace(tagRe.ReplaceAllString(h, "\n"))
 	h = regexp.MustCompile(`<[^>]*>`).ReplaceAllString(h, "")
 	return strings.TrimSpace(html.UnescapeString(h))
+}
+
+// htmlOf is what Product.descriptionHtml reads: what was last written, else the
+// plain text the seed or the merchant set.
+func htmlOf(p product) string {
+	if p.DescHTML != "" {
+		return p.DescHTML
+	}
+	return p.Desc
 }
 
 func nullIfEmpty(s string) any {

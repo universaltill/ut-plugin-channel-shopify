@@ -507,7 +507,7 @@ type productRead struct {
 		Barcode string `json:"barcode"`
 		Product *struct {
 			ID            string `json:"id"`
-			Description   string `json:"description"`
+			Description   string `json:"descriptionHtml"` // not Product.description: it glues paragraphs
 			Title         string `json:"title"`
 			Status        string `json:"status"`
 			UpdatedAt     string `json:"updatedAt"`

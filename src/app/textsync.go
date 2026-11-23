@@ -47,11 +47,15 @@ func NormalizeText(s string) string {
 var htmlEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 
 // descriptionHTML turns item text into escaped <p> paragraphs (one per
-// non-empty line) and nothing else: no tag from the item is ever emitted.
+// non-empty line) and nothing else: no tag from the item is ever emitted. Each
+// line goes through NormalizeText first, so markup debris in the item text
+// ("<b>x</b>") is dropped here exactly as the cloud drops it when it compares:
+// the HTML read back from Shopify then NormalizeText-equals the item text and a
+// push never ping-pongs (ut-docs#6843 live run).
 func descriptionHTML(text string) string {
 	var b strings.Builder
 	for _, line := range strings.Split(strings.ReplaceAll(text, "\r", ""), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
+		if line = NormalizeText(line); line != "" {
 			b.WriteString("<p>" + htmlEscaper.Replace(line) + "</p>")
 		}
 	}
