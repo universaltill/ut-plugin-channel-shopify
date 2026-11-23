@@ -63,7 +63,7 @@ hand-rolled `//go:wasmimport` lines. It runs only in the ut-cloud channel host
   than `at`. One read decides every field (a write bumps `updatedAt`). ARCHIVED is
   never touched; a merchant-drafted product is re-published only when `changed`
   has `active`. description (escaped `<p>` paragraphs via `descriptionHtml`, compared on
-  `NormalizeText`), the variant sku (`inventoryItem.sku`) and the FIRST barcode are
+  `NormalizeText`; markup in the item text is dropped per line before escaping, and the description is READ as `descriptionHtml`, never `Product.description`, which glues paragraphs: live 2026-11-23, 0.7.1), the variant sku (`inventoryItem.sku`) and the FIRST barcode are
   written the same way (only when in `changed`, never cleared by an empty value,
   never over a later Shopify edit, no request when Shopify already holds the
   value); an op from an older cloud (no `changed`) writes none of them. The cloud queues

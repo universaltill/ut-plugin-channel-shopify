@@ -81,7 +81,7 @@ type gqlProduct struct {
 	gqlCategorised
 	ID          string      `json:"id"`
 	Title       string      `json:"title"`
-	Description string      `json:"description"`
+	Description string      `json:"descriptionHtml"` // HTML: Product.description glues paragraphs ("ab"), live 2026-11-23
 	Status      string      `json:"status"`
 	UpdatedAt   string      `json:"updatedAt"`
 	Variants    gqlVariants `json:"variants"`

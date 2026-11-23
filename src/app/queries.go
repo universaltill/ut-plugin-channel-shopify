@@ -112,7 +112,7 @@ const (
 	// item is the VARIANT id, so the product to update comes from here.
 	// productVariant(id:), its product { id } and price (a decimal string) are
 	// written from memory: README row "productVariant(id:)".
-	mVariantLookup = `productVariant(id: $id) { id sku barcode product { id description ` + fProductState + ` ` + fCategory + ` } price }`
+	mVariantLookup = `productVariant(id: $id) { id sku barcode product { id descriptionHtml ` + fProductState + ` ` + fCategory + ` } price }`
 	// refundCreate takes the op id as Shopify's own idempotency key too
 	// (ADR-0169 section 3: mandatory on refund mutations).
 	// refund { totalRefundedSet } (Refund.totalRefundedSet, a MoneyBag) is what
@@ -183,7 +183,7 @@ var (
 
 	qProducts = queryDef{Name: "Products", Cost: 700, Text: `query Products($first: Int!, $after: String, $vfirst: Int!) { ` +
 		`shop { currencyCode taxesIncluded } products(first: $first, after: $after, sortKey: ID) { ` + pageInfo +
-		` nodes { id title description status updatedAt ` + fCategory + ` ` + fFeatured + ` variants(first: $vfirst) { ` + pageInfo + ` nodes { ` + variantFields + ` } } } } }`}
+		` nodes { id title descriptionHtml status updatedAt ` + fCategory + ` ` + fFeatured + ` variants(first: $vfirst) { ` + pageInfo + ` nodes { ` + variantFields + ` } } } } }`}
 
 	qMoreVariants = queryDef{Name: "MoreVariants", Cost: 200, Text: `query MoreVariants($id: ID!, $first: Int!, $after: String) { ` +
 		`node(id: $id) { ... on Product { variants(first: $first, after: $after) { ` + pageInfo + ` nodes { ` + variantFields + ` } } } } }`}

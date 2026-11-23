@@ -159,7 +159,10 @@ func TestDescriptionIsEscapedAndNeverCarriesItemMarkup(t *testing.T) {
 		t.Fatalf("%+v", a)
 	}
 	got := e.shop.DescriptionHTML(p)
-	want := "<p>Fish &amp; chips &lt;script&gt;alert(1)&lt;/script&gt;</p><p>&lt;b&gt;bold&lt;/b&gt; 1 &gt; 0</p>"
+	// Markup in the item text is dropped (as the cloud's NormalizeText drops it), never
+	// emitted and never written escaped: escaped text would read back as "<b>bold</b>"
+	// and differ from the item's own normalised text (ping-pong, live run 2026-11-23).
+	want := "<p>Fish &amp; chips alert(1)</p><p>bold 1 &gt; 0</p>"
 	if got != want || strings.Contains(got, "<script") || strings.Contains(got, "<b>") {
 		t.Fatalf("descriptionHtml %q, want %q", got, want)
 	}
@@ -219,7 +222,7 @@ func TestContractShapedOpDrivesTheAdapterOnceAndSettles(t *testing.T) {
 		}
 	}
 	if e.shop.SKU(v) != "DEMO-0001-0" || e.shop.Barcode(v) != "5999999999991" ||
-		e.shop.DescriptionHTML(p) != "<p>First line</p><p>Second &amp; &lt;b&gt;line&lt;/b&gt;</p>" {
+		e.shop.DescriptionHTML(p) != "<p>First line</p><p>Second &amp; line</p>" {
 		t.Errorf("sku %q barcode %q html %q", e.shop.SKU(v), e.shop.Barcode(v), e.shop.DescriptionHTML(p))
 	}
 	if n, _ := countLogs(e, "listing.fields_ignored"); n != 0 {
