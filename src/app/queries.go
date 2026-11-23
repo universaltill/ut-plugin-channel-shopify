@@ -51,6 +51,9 @@ const (
 	// and the FIRST collection. collections needs first/last. Verified read-only
 	// against the Admin API 2026-10 (README rows).
 	fCategory = `productType category { name } collections(first: 1) { nodes { title } }`
+	// The product's primary image for the import: the first media (Product.featuredMedia,
+	// a Media; only a MediaImage has image { url }). Only its url and id are read.
+	fFeatured = `featuredMedia { id ... on MediaImage { image { url } } }`
 	// What the name and status push decide from (ut-docs#5014), read ONCE per op:
 	// the title, the status, updatedAt (the "Shopify edited it later" guard) and
 	// the number of variants (a title is only written to a single-variant
@@ -109,7 +112,7 @@ const (
 	// item is the VARIANT id, so the product to update comes from here.
 	// productVariant(id:), its product { id } and price (a decimal string) are
 	// written from memory: README row "productVariant(id:)".
-	mVariantLookup = `productVariant(id: $id) { id product { id ` + fProductState + ` ` + fCategory + ` } price }`
+	mVariantLookup = `productVariant(id: $id) { id sku barcode product { id description ` + fProductState + ` ` + fCategory + ` } price }`
 	// refundCreate takes the op id as Shopify's own idempotency key too
 	// (ADR-0169 section 3: mandatory on refund mutations).
 	// refund { totalRefundedSet } (Refund.totalRefundedSet, a MoneyBag) is what
@@ -180,7 +183,7 @@ var (
 
 	qProducts = queryDef{Name: "Products", Cost: 700, Text: `query Products($first: Int!, $after: String, $vfirst: Int!) { ` +
 		`shop { currencyCode taxesIncluded } products(first: $first, after: $after, sortKey: ID) { ` + pageInfo +
-		` nodes { id title description status updatedAt ` + fCategory + ` variants(first: $vfirst) { ` + pageInfo + ` nodes { ` + variantFields + ` } } } } }`}
+		` nodes { id title description status updatedAt ` + fCategory + ` ` + fFeatured + ` variants(first: $vfirst) { ` + pageInfo + ` nodes { ` + variantFields + ` } } } } }`}
 
 	qMoreVariants = queryDef{Name: "MoreVariants", Cost: 200, Text: `query MoreVariants($id: ID!, $first: Int!, $after: String) { ` +
 		`node(id: $id) { ... on Product { variants(first: $first, after: $after) { ` + pageInfo + ` nodes { ` + variantFields + ` } } } } }`}
@@ -219,6 +222,22 @@ var (
 	qVariantPrice = queryDef{Name: "VariantPrice", Cost: 5, Text: `query VariantPrice($id: ID!) { ` + mVariantLookup + ` }`}
 
 	qProductType = queryDef{Name: "ProductType", Cost: 10, Mutation: true, Text: `mutation ProductType($product: ProductUpdateInput!) { ` + mProductType + ` }`}
+
+	// image.upsert (ADR-0212): what the product holds (our sha in a product metafield,
+	// the first media and its status), the media create from the signed URL, the
+	// reorder that makes it primary, and the metafield that remembers its sha.
+	// Names are from the Admin API docs; none has run against a real store.
+	qProductImage = queryDef{Name: "ProductImage", Cost: 5, Text: `query ProductImage($id: ID!, $ns: String!, $key: String!, $mkey: String!) { product(id: $id) { id ` +
+		`metafield(namespace: $ns, key: $key) { value } mediaRef: metafield(namespace: $ns, key: $mkey) { value } media(first: 10) { nodes { id status } } } }`}
+
+	qProductCreateMedia = queryDef{Name: "ProductCreateMedia", Cost: 10, Mutation: true, Text: `mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) { ` +
+		`productCreateMedia(productId: $productId, media: $media) { media { id } mediaUserErrors { field } } }`}
+
+	qProductReorderMedia = queryDef{Name: "ProductReorderMedia", Cost: 10, Mutation: true, Text: `mutation ProductReorderMedia($id: ID!, $moves: [MoveInput!]!) { ` +
+		`productReorderMedia(id: $id, moves: $moves) { mediaUserErrors { field } } }`}
+
+	qMetafieldsSet = queryDef{Name: "MetafieldsSet", Cost: 10, Mutation: true, Text: `mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) { ` +
+		`metafieldsSet(metafields: $metafields) { userErrors { field } } }`}
 
 	qVariantPrices = queryDef{Name: "VariantPrices", Cost: 20, Mutation: true, Text: `mutation VariantPrices($productId: ID!, $variants: [ProductVariantsBulkInput!]!) { ` +
 		`productVariantsBulkUpdate(productId: $productId, variants: $variants) { userErrors { code } } }`}

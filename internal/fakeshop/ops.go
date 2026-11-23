@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"regexp"
 	"sort"
 	"strconv"
@@ -175,12 +176,20 @@ func (s *Shop) dispatch(req gqlRequest) (any, string) {
 			case "noproduct": // a variant whose product is gone
 				return obj{"productVariant": obj{"id": v.ID, "product": nil, "price": v.Price}}, ""
 			}
-			return obj{"productVariant": obj{"id": v.ID, "product": obj{"id": pr.ID, "title": pr.Title, "status": pr.Status, "updatedAt": pr.UpdatedAt, "variantsCount": obj{"count": len(pr.Variants)},
+			return obj{"productVariant": obj{"id": v.ID, "sku": v.SKU, "barcode": nullIfEmpty(v.Barcode), "product": obj{"id": pr.ID, "description": pr.Desc, "title": pr.Title, "status": pr.Status, "updatedAt": pr.UpdatedAt, "variantsCount": obj{"count": len(pr.Variants)},
 				"productType": pr.ProductType, "category": taxonomyJSON(*pr), "collections": collectionsJSON(*pr)}, "price": v.Price}}, ""
 		}
 		return obj{"productVariant": nil}, ""
 	case "ProductType":
 		return s.opProductType(req), ""
+	case "ProductImage":
+		return s.opProductImage(req), ""
+	case "ProductCreateMedia":
+		return s.opCreateMedia(req), ""
+	case "ProductReorderMedia":
+		return s.opReorderMedia(req), ""
+	case "MetafieldsSet":
+		return s.opMetafieldsSet(req), ""
 	case "VariantPrices":
 		return s.opPrices(req), ""
 	case "FulfilmentOrders":
@@ -261,7 +270,7 @@ func (s *Shop) opProducts(req gqlRequest) obj {
 			id = "gid://shopify/Product/../../admin"
 		}
 		nodes = append(nodes, obj{"id": id, "title": title, "description": p.Desc, "status": p.Status, "updatedAt": p.UpdatedAt,
-			"productType": p.ProductType, "category": taxonomyJSON(p), "collections": collectionsJSON(p),
+			"productType": p.ProductType, "category": taxonomyJSON(p), "collections": collectionsJSON(p), "featuredMedia": featuredJSON(p),
 			"variants": s.variantPage(p, s.num(req, "vfirst", 50), "")})
 	}
 	return obj{"shop": shop, "products": obj{"pageInfo": pi(more, ec), "nodes": nodes}}
@@ -493,7 +502,11 @@ func (s *Shop) opPrices(req gqlRequest) obj {
 	fail := func() obj {
 		return obj{"productVariantsBulkUpdate": obj{"userErrors": []obj{{"code": "PRODUCT_VARIANT_DOES_NOT_EXIST"}}}}
 	}
-	var in []struct{ ID, Price string }
+	var in []struct {
+		ID, Price string
+		Barcode   *string
+		Inventory *struct{ SKU *string } `json:"inventoryItem"`
+	}
 	s.vars(req, "variants", &in)
 	var p *product
 	for i := range s.products {
@@ -509,15 +522,25 @@ func (s *Shop) opPrices(req gqlRequest) obj {
 		for _, v := range p.Variants {
 			ok = ok || v.ID == x.ID
 		}
-		if !ok || !priceRe.MatchString(x.Price) {
+		if !ok || (x.Price != "" && !priceRe.MatchString(x.Price)) {
 			return fail()
 		}
 	}
 	for _, x := range in {
 		for i := range p.Variants {
 			if p.Variants[i].ID == x.ID {
-				p.Variants[i].Price = x.Price
-				s.acts["price:"+x.ID]++
+				if x.Price != "" {
+					p.Variants[i].Price = x.Price
+					s.acts["price:"+x.ID]++
+				}
+				if x.Barcode != nil {
+					p.Variants[i].Barcode = *x.Barcode
+					s.acts["barcode:"+x.ID]++
+				}
+				if x.Inventory != nil && x.Inventory.SKU != nil {
+					p.Variants[i].SKU = *x.Inventory.SKU
+					s.acts["sku:"+x.ID]++
+				}
 			}
 		}
 	}
@@ -764,6 +787,7 @@ func (s *Shop) opProductType(req gqlRequest) obj {
 		ProductType *string `json:"productType"`
 		Title       *string `json:"title"`
 		Status      *string `json:"status"`
+		DescHTML    *string `json:"descriptionHtml"`
 	}
 	s.vars(req, "product", &in)
 	if s.refuseType {
@@ -782,6 +806,11 @@ func (s *Shop) opProductType(req gqlRequest) obj {
 				s.products[i].Title = *in.Title
 				s.acts["title:"+in.ID]++
 			}
+			if in.DescHTML != nil {
+				s.products[i].DescHTML = *in.DescHTML
+				s.products[i].Desc = htmlToPlain(*in.DescHTML)
+				s.acts["description:"+in.ID]++
+			}
 			if in.Status != nil {
 				s.products[i].Status = *in.Status
 				s.acts["status:"+in.ID]++
@@ -791,4 +820,131 @@ func (s *Shop) opProductType(req gqlRequest) obj {
 		}
 	}
 	return obj{"productUpdate": obj{"userErrors": []obj{{"field": []string{"id"}}}}}
+}
+
+var tagRe = regexp.MustCompile(`</p>\s*`)
+
+// htmlToPlain is what Shopify's Product.description gives for descriptionHtml:
+// plain text, paragraphs on their own lines, entities decoded.
+func htmlToPlain(h string) string {
+	h = strings.TrimSpace(tagRe.ReplaceAllString(h, "\n"))
+	h = regexp.MustCompile(`<[^>]*>`).ReplaceAllString(h, "")
+	return strings.TrimSpace(html.UnescapeString(h))
+}
+
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func featuredJSON(p product) any {
+	if len(p.Media) == 0 {
+		return nil
+	}
+	return obj{"id": p.Media[0].ID, "image": obj{"url": p.Media[0].Source}}
+}
+
+func (s *Shop) opProductImage(req gqlRequest) obj {
+	for _, p := range s.products {
+		if p.ID == s.str(req, "id") {
+			var mf any
+			if p.ImageSHA != "" {
+				mf = obj{"value": p.ImageSHA}
+			}
+			var mref any
+			if p.ImageMediaID != "" {
+				mref = obj{"value": p.ImageMediaID}
+			}
+			nodes := []obj{}
+			for i, m := range p.Media {
+				if i >= 10 { // media(first: 10)
+					break
+				}
+				nodes = append(nodes, obj{"id": m.ID, "status": m.Status})
+			}
+			return obj{"product": obj{"id": p.ID, "metafield": mf, "mediaRef": mref, "media": obj{"nodes": nodes}}}
+		}
+	}
+	return obj{"product": nil}
+}
+
+func (s *Shop) opCreateMedia(req gqlRequest) obj {
+	var in []struct {
+		Source string `json:"originalSource"`
+		Alt    string `json:"alt"`
+		Type   string `json:"mediaContentType"`
+	}
+	s.vars(req, "media", &in)
+	bad := obj{"productCreateMedia": obj{"media": []obj{}, "mediaUserErrors": []obj{{"field": []string{"media"}, "code": "INVALID"}}}}
+	if s.refuseMedia || len(in) != 1 || !strings.HasPrefix(in[0].Source, "https://") || in[0].Type != "IMAGE" {
+		return bad
+	}
+	for i := range s.products {
+		if s.products[i].ID == s.str(req, "productId") {
+			s.mediaSeq++
+			m := Media{ID: gid("MediaImage", 9000+s.mediaSeq), Source: in[0].Source, Alt: in[0].Alt, Status: "UPLOADED"}
+			s.products[i].Media = append(s.products[i].Media, m)
+			s.acts["media:"+s.products[i].ID]++
+			return obj{"productCreateMedia": obj{"media": []obj{{"id": m.ID}}, "mediaUserErrors": []obj{}}}
+		}
+	}
+	return bad
+}
+
+func (s *Shop) opReorderMedia(req gqlRequest) obj {
+	var moves []struct {
+		ID  string `json:"id"`
+		Pos string `json:"newPosition"`
+	}
+	s.vars(req, "moves", &moves)
+	for i := range s.products {
+		if s.products[i].ID != s.str(req, "id") {
+			continue
+		}
+		for _, mv := range moves {
+			pos, err := strconv.Atoi(mv.Pos)
+			from := -1
+			for j, m := range s.products[i].Media {
+				if m.ID == mv.ID {
+					from = j
+				}
+			}
+			if err != nil || from < 0 || pos < 0 || pos >= len(s.products[i].Media) {
+				return obj{"productReorderMedia": obj{"mediaUserErrors": []obj{{"field": []string{"moves"}, "code": "INVALID_MOVE"}}}}
+			}
+			m := s.products[i].Media[from]
+			rest := append(append([]Media(nil), s.products[i].Media[:from]...), s.products[i].Media[from+1:]...)
+			s.products[i].Media = append(append(append([]Media(nil), rest[:pos]...), m), rest[pos:]...)
+		}
+		return obj{"productReorderMedia": obj{"mediaUserErrors": []obj{}}}
+	}
+	return obj{"productReorderMedia": obj{"mediaUserErrors": []obj{{"field": []string{"id"}, "code": "PRODUCT_DOES_NOT_EXIST"}}}}
+}
+
+func (s *Shop) opMetafieldsSet(req gqlRequest) obj {
+	var in []struct {
+		Owner, Namespace, Key, Type, Value string
+	}
+	var raw []map[string]string
+	s.vars(req, "metafields", &raw)
+	for _, r := range raw {
+		in = append(in, struct{ Owner, Namespace, Key, Type, Value string }{r["ownerId"], r["namespace"], r["key"], r["type"], r["value"]})
+	}
+	for _, m := range in {
+		if m.Namespace != "unitill" || (m.Key != "image_sha256" && m.Key != "image_media_id") || m.Type != "single_line_text_field" {
+			return obj{"metafieldsSet": obj{"userErrors": []obj{{"field": []string{"metafields"}, "code": "INVALID_TYPE"}}}}
+		}
+		for i := range s.products {
+			if s.products[i].ID == m.Owner {
+				if m.Key == "image_media_id" {
+					s.products[i].ImageMediaID = m.Value
+				} else {
+					s.products[i].ImageSHA = m.Value
+				}
+			}
+		}
+	}
+	return obj{"metafieldsSet": obj{"userErrors": []obj{}}}
 }

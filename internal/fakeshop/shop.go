@@ -80,12 +80,25 @@ type variant struct {
 
 type product struct {
 	ID, Title, Desc, Status, UpdatedAt string
+	// DescHTML is the last descriptionHtml written through the API.
+	DescHTML string
 	// ProductType is the merchant's free-text type; Taxonomy the name of the
 	// standard product category ("" = none); Collections the titles, in the
 	// order Shopify lists them.
 	ProductType, Taxonomy string
 	Collections           []string
 	Variants              []variant
+	// Media is the product's media in position order (first = primary);
+	// ImageSHA is the adapter's own product metafield unitill.image_sha256.
+	Media    []Media
+	ImageSHA string
+	// ImageMediaID is the adapter's metafield unitill.image_media_id: the media it pushed.
+	ImageMediaID string
+}
+
+// Media is one product media item. Status is Shopify's MediaStatus.
+type Media struct {
+	ID, Source, Alt, Status string
 }
 
 type level struct {
@@ -202,6 +215,8 @@ type Shop struct {
 	oddJob                            *obj // the next cancel is accepted with this job in the answer (nil job: no job) and not carried out
 	oddJobSet                         bool
 	refuseType                        bool // productUpdate answers a userError
+	refuseMedia                       bool // productCreateMedia answers a mediaUserError
+	mediaSeq                          int
 	failJob                           bool // the next cancel job ends done without cancelling
 	jobs                              map[string]*cancelJob
 	pending                           map[string]string // order id -> job id of a cancel still running
@@ -997,4 +1012,164 @@ func (s *Shop) SetGraphQLThrottle(every int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.opt.GraphQLThrottleEvery = every
+}
+
+// SetDescription changes a product's description as if the merchant did it in
+// Shopify's admin (plain text, as Product.description reads it).
+func (s *Shop) SetDescription(productID, text string) {
+	s.mu.Lock()
+	for i := range s.products {
+		if s.products[i].ID == productID {
+			s.products[i].Desc = text
+			s.products[i].DescHTML = text
+			s.products[i].UpdatedAt = s.bump()
+		}
+	}
+	s.mu.Unlock()
+}
+
+// Description is the plain text Product.description reads as.
+func (s *Shop) Description(productID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.products {
+		if p.ID == productID {
+			return p.Desc
+		}
+	}
+	return ""
+}
+
+// DescriptionHTML is the last descriptionHtml the adapter wrote.
+func (s *Shop) DescriptionHTML(productID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.products {
+		if p.ID == productID {
+			return p.DescHTML
+		}
+	}
+	return ""
+}
+
+// SetSKU and SetBarcode change a variant as the merchant would in the admin.
+func (s *Shop) SetSKU(variantID, sku string) {
+	s.mu.Lock()
+	if v, p := s.findVariant(variantID); v != nil {
+		v.SKU = sku
+		p.UpdatedAt = s.bump()
+	}
+	s.mu.Unlock()
+}
+
+func (s *Shop) SetBarcode(variantID, barcode string) {
+	s.mu.Lock()
+	if v, p := s.findVariant(variantID); v != nil {
+		v.Barcode = barcode
+		p.UpdatedAt = s.bump()
+	}
+	s.mu.Unlock()
+}
+
+// SKU and Barcode are a variant's values as the shop holds them.
+func (s *Shop) SKU(variantID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v, _ := s.findVariant(variantID); v != nil {
+		return v.SKU
+	}
+	return ""
+}
+
+func (s *Shop) Barcode(variantID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v, _ := s.findVariant(variantID); v != nil {
+		return v.Barcode
+	}
+	return ""
+}
+
+// RefuseMedia makes productCreateMedia answer a mediaUserError.
+func (s *Shop) RefuseMedia() {
+	s.mu.Lock()
+	s.refuseMedia = true
+	s.mu.Unlock()
+}
+
+// SetImage replaces the product's media with one image, as the merchant would
+// in the admin (the url is what Shopify serves it from).
+func (s *Shop) SetImage(productID, url, alt string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.products {
+		if s.products[i].ID == productID {
+			s.mediaSeq++
+			s.products[i].Media = []Media{{ID: gid("MediaImage", 9000+s.mediaSeq), Source: url, Alt: alt, Status: "READY"}}
+			s.products[i].UpdatedAt = s.bump()
+		}
+	}
+}
+
+// AddImage appends another image after the existing ones.
+func (s *Shop) AddImage(productID, url, alt string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.products {
+		if s.products[i].ID == productID {
+			s.mediaSeq++
+			s.products[i].Media = append(s.products[i].Media, Media{ID: gid("MediaImage", 9000+s.mediaSeq), Source: url, Alt: alt, Status: "READY"})
+		}
+	}
+}
+
+// SetMediaStatus sets the status (for example FAILED) of every media of a product.
+func (s *Shop) SetMediaStatus(productID, status string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.products {
+		if s.products[i].ID == productID {
+			for j := range s.products[i].Media {
+				s.products[i].Media[j].Status = status
+			}
+		}
+	}
+}
+
+// PrependImage puts a merchant's own image in front of the existing media (the primary one).
+func (s *Shop) PrependImage(productID, url, alt string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.products {
+		if s.products[i].ID == productID {
+			s.mediaSeq++
+			m := Media{ID: gid("MediaImage", 9000+s.mediaSeq), Source: url, Alt: alt, Status: "READY"}
+			s.products[i].Media = append([]Media{m}, s.products[i].Media...)
+			s.products[i].UpdatedAt = s.bump()
+		}
+	}
+}
+
+// Media is the product's media, first = primary.
+func (s *Shop) Media(productID string) []Media {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.products {
+		if p.ID == productID {
+			return append([]Media(nil), p.Media...)
+		}
+	}
+	return nil
+}
+
+// ImageSHA is the sha256 the adapter stored on the product.
+func (s *Shop) ImageSHA(productID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.products {
+		if p.ID == productID {
+			return p.ImageSHA
+		}
+	}
+	return ""
 }

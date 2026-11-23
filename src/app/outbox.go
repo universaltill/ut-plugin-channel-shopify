@@ -132,6 +132,8 @@ func perform(op channel.OutboxOp) channel.Ack {
 		return refundCreate(op)
 	case channel.OpListingUnpublish:
 		return listingUnpublish(op)
+	case channel.OpImageUpsert:
+		return imageUpsert(op)
 	}
 	// Nothing else is done; the op is dead-lettered with a logged code.
 	hostLog(channel.LevelWarn, "outbox.unsupported_op", map[string]any{"kind": clip(strings.ToValidUTF8(op.Kind, ""), 40)})
@@ -501,8 +503,11 @@ func validTitle(name string) (string, bool) {
 type productRead struct {
 	Variant *struct {
 		ID      string `json:"id"`
+		SKU     string `json:"sku"`
+		Barcode string `json:"barcode"`
 		Product *struct {
 			ID            string `json:"id"`
+			Description   string `json:"description"`
 			Title         string `json:"title"`
 			Status        string `json:"status"`
 			UpdatedAt     string `json:"updatedAt"`
@@ -601,7 +606,7 @@ func listingUnpublish(op channel.OutboxOp) channel.Ack {
 }
 
 // listingUpsert pushes an EXISTING listing's fields to Shopify. The manifest
-// declares items "both" and push_fields ["price","name"] (ADR-0169 criterion 6;
+// declares items "both" and push_fields [price, name, description, sku, barcodes] (ADR-0169 criterion 6;
 // ADR-0202, ut-docs#5014). The cloud's external id for an imported item is the
 // Shopify VARIANT id, in op.ExternalID and in variants[0].external_id; the
 // product to update is read from the variant. The cloud says which fields
@@ -629,14 +634,17 @@ func listingUpsert(op channel.OutboxOp) channel.Ack {
 	}
 	var p struct {
 		Name         string                  `json:"name"`
+		Description  string                  `json:"description"`
 		Status       string                  `json:"status"`
 		CategoryPath []string                `json:"category_path"`
 		Changed      map[string]changedField `json:"changed"` // nil = absent (or null)
 		Variants     []struct {
-			ExternalID string `json:"external_id"`
-			PriceMinor int64  `json:"price_minor"`
-			Currency   string `json:"currency"`
-			TaxIncl    bool   `json:"tax_included"`
+			ExternalID string   `json:"external_id"`
+			SKU        string   `json:"sku"`
+			Barcodes   []string `json:"barcodes"`
+			PriceMinor int64    `json:"price_minor"`
+			Currency   string   `json:"currency"`
+			TaxIncl    bool     `json:"tax_included"`
 		} `json:"variants"`
 	}
 	if !okGID(tVariant, op.ExternalID) || json.Unmarshal(op.Payload, &p) != nil || len(p.Variants) != 1 ||
@@ -661,6 +669,24 @@ func listingUpsert(op channel.OutboxOp) channel.Ack {
 	if pushName {
 		title, titleOK = validTitle(p.Name)
 	}
+	// description, sku and barcodes (ut-docs#6843): only on a present key, never
+	// for an older cloud. Empty wanted values are never written (a push never
+	// clears a channel value); invalid ones are refused before any request.
+	chDesc, pushDesc := p.Changed["description"]
+	chSKU, pushSKU := p.Changed["sku"]
+	chBar, pushBar := p.Changed["barcodes"]
+	wantDesc, wantSKU, wantBar := NormalizeText(p.Description), "", ""
+	descText := strings.ToValidUTF8(p.Description, "")
+	skuOK, barOK := true, true
+	if pushSKU {
+		wantSKU, skuOK = validCode(want.SKU)
+	}
+	if pushBar && len(want.Barcodes) > 0 { // Shopify has one barcode: the item's first
+		wantBar, barOK = validCode(want.Barcodes[0])
+	}
+	if !skuOK || !barOK || (pushDesc && utf8.RuneCountInString(wantDesc) > maxDescRunes) {
+		return fail("invalid_payload", false)
+	}
 	// The ONE category goes to Shopify as productType and nothing else
 	// (ut-docs#4944; collections and the standard category are never edited).
 	// The leaf of the path is the category; an empty path writes nothing.
@@ -668,7 +694,7 @@ func listingUpsert(op channel.OutboxOp) channel.Ack {
 	if n := len(p.CategoryPath); n > 0 {
 		wantType = categoryName(p.CategoryPath[n-1])
 	}
-	if !pushPrice && !pushName && !pushActive {
+	if !pushPrice && !pushName && !pushActive && !pushDesc && !pushSKU && !pushBar {
 		logFieldsIgnored(op)
 		return channel.Ack{ExternalID: op.ExternalID} // nothing of ours changed (an empty changed): no request
 	}
@@ -737,23 +763,54 @@ func listingUpsert(op channel.OutboxOp) channel.Ack {
 			}
 		}
 	}
+	if pushDesc && wantDesc != "" && wantDesc != NormalizeText(pr.Description) {
+		var was string
+		if json.Unmarshal(chDesc.Was, &was) == nil && chDesc.shopifyLater(NormalizeText(pr.Description) != NormalizeText(was), pr.UpdatedAt) {
+			hostLog(channel.LevelInfo, "listing.description_skipped_shopify_newer", nil)
+		} else {
+			in[kDescriptionHTML] = descriptionHTML(descText)
+		}
+	}
+	// SKU and barcode are variant fields, written with the price in the one
+	// bulk update (ProductVariantsBulkInput: barcode, inventoryItem.sku).
+	vin := map[string]any{"id": op.ExternalID}
+	if writePrice {
+		vin["price"] = formatMoney(want.PriceMinor, want.Currency)
+	}
+	if pushSKU && wantSKU != "" && wantSKU != strings.TrimSpace(cur.Variant.SKU) {
+		var was string
+		if json.Unmarshal(chSKU.Was, &was) == nil && chSKU.shopifyLater(strings.TrimSpace(cur.Variant.SKU) != strings.TrimSpace(was), pr.UpdatedAt) {
+			hostLog(channel.LevelInfo, "listing.sku_skipped_shopify_newer", nil)
+		} else {
+			vin["inventoryItem"] = map[string]any{"sku": wantSKU}
+		}
+	}
+	if pushBar && wantBar != "" && wantBar != strings.TrimSpace(cur.Variant.Barcode) {
+		var was string
+		if json.Unmarshal(chBar.Was, &was) == nil && chBar.shopifyLater(strings.TrimSpace(cur.Variant.Barcode) != strings.TrimSpace(was), pr.UpdatedAt) {
+			hostLog(channel.LevelInfo, "listing.barcode_skipped_shopify_newer", nil)
+		} else {
+			vin["barcode"] = wantBar
+		}
+	}
+	writeVariant := len(vin) > 1
 	if pushActive && p.Status != "" {
 		if st := wantStatus(cur, p.Status == "active", chActive); st != "" {
 			in[kStatus] = st
 		}
 	}
-	if !writePrice && len(in) == 1 {
+	if !writeVariant && len(in) == 1 {
 		logFieldsIgnored(op)
 		return channel.Ack{ExternalID: op.ExternalID} // already there: no write
 	}
-	if writePrice {
+	if writeVariant {
 		var r struct {
 			Update struct {
 				Errors []userError `json:"userErrors"`
 			} `json:"productVariantsBulkUpdate"`
 		}
-		inputs := []map[string]any{{"id": op.ExternalID, "price": formatMoney(want.PriceMinor, want.Currency)}}
-		// An absolute price is safe to repeat, so the host may re-send it.
+		inputs := []map[string]any{vin}
+		// Absolute values are safe to repeat, so the host may re-send it.
 		if err := run(qVariantPrices, map[string]any{"productId": pr.ID, "variants": inputs}, op.ID, &r); err != nil {
 			return failFor(err)
 		}
@@ -772,9 +829,11 @@ func listingUpsert(op channel.OutboxOp) channel.Ack {
 		}
 		_, hasTitle := in[kTitle]
 		_, hasStatus := in[kStatus]
+		_, hasDesc := in[kDescriptionHTML]
+		hasTitle = hasTitle || hasDesc
 		switch {
 		case ok:
-		case (hasTitle || hasStatus) && !writePrice:
+		case (hasTitle || hasStatus) && !writeVariant:
 			// Nothing was written: a silent ack would move the baseline to a value
 			// Shopify never took. Surface the refusal instead.
 			hostLog(channel.LevelWarn, "listing.product_update_rejected", nil)
@@ -809,15 +868,21 @@ func logFieldsIgnored(op channel.OutboxOp) {
 	if spent.ignoredLogged || json.Unmarshal(op.Payload, &top) != nil || json.Unmarshal(op.Payload, &all) != nil {
 		return
 	}
+	// With a changed key (a cloud that knows description, sku and barcodes)
+	// those three are pushed fields, not ignored ones.
+	pushed := false
+	if raw, ok := top["changed"]; ok && string(raw) != "null" {
+		pushed = true
+	}
 	n := 0
 	for _, k := range ignoredTop {
-		if _, ok := top[k]; ok {
+		if _, ok := top[k]; ok && (!pushed || k != "description") {
 			n++
 		}
 	}
 	for _, v := range all.Variants {
 		for _, k := range ignoredVariant {
-			if _, ok := v[k]; ok {
+			if _, ok := v[k]; ok && (!pushed || (k != "sku" && k != "barcodes")) {
 				n++
 			}
 		}
