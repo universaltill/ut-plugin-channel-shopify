@@ -43,7 +43,7 @@ hand-rolled `//go:wasmimport` lines. It runs only in the ut-cloud channel host
   a dev-store order** (money, names from memory). Cancel is acked only once the
   order shows cancelled: job polled once, still running = retryable
   `cancel_pending`, ended uncancelled = `cancel_failed`.
-- **Images (0.7.0, ADR-0212, ut-docs#6843 S5).** `image.upsert` `{cloud_id, external_id, sha256,
+- **Images (code 0.7.0, ADR-0212, ut-docs#6843 S5; DORMANT since 0.7.2, "image" not in push_fields, ut-docs#6975).** `image.upsert` `{cloud_id, external_id, sha256,
   content_type, fetch_url, alt?}`: the plugin hands the cloud's signed `fetch_url` to
   `productCreateMedia(originalSource)` and never sees bytes; only Shopify fetches it, so no egress
   host is added. The URL is never logged or put in an ack. The sha256 of the last pushed image is
@@ -52,7 +52,7 @@ hand-rolled `//go:wasmimport` lines. It runs only in the ut-cloud channel host
   position 0. Old media are never deleted. Bad payload = `invalid_payload`; a payload without any
   image key (old shape) or another kind = `unsupported_op`. Import reads `featuredMedia` as
   `images[0]` (https URL only); the cloud downloads and hashes it.
-- **`items` is `both`; `push_fields` is `["price","name","description","sku","barcodes","image"]`** (image added in 0.7.0, ADR-0212; description/sku/barcodes 0.6.0, ut-docs#6843, ADR-0202 amendment 2026-11-23) (owner requirement
+- **`items` is `both`; `push_fields` is `["price","name","description","sku","barcodes"]`** (image is NOT declared: the till validator rejects it until ADR-0212 is Accepted, ut-docs#6975, 0.7.2; the image.upsert code stays dormant; description/sku/barcodes 0.6.0, ut-docs#6843, ADR-0202 amendment 2026-11-23) (owner requirement
   2026-11-20, ADR-0202, ut-docs#5014: the name syncs both ways, the later
   change wins; `scripts/validate.sh` pins the list). Beyond the price the adapter
   writes the product title (single-variant products only) and DRAFT/ACTIVE

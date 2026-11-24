@@ -97,8 +97,7 @@ connection's verified account and adds the access token.
   category of an already-categorised product waits for the cloud to send the
   category only when it changed (proposal on ut-docs#4942).
 
-  **Image sync (0.7.0, ADR-0212, ut-docs#6843 S5).** `push_fields` is now
-  `["price","name","description","sku","barcodes","image"]`. `image.upsert` passes the cloud's
+  **Image sync (code in 0.7.0, ADR-0212, ut-docs#6843 S5; DORMANT since 0.7.2, ut-docs#6975).** `"image"` is not in `push_fields`: the till validator rejects it until ADR-0212 is Accepted and the till allows it; re-add it then and widen `scripts/check-push-fields.sh`. `image.upsert` passes the cloud's
   signed, at most 15 minute `fetch_url` to Shopify as `productCreateMedia` `originalSource`
   (Shopify fetches; the plugin never gets bytes; no egress host added; the URL is never logged).
   The pushed sha256 is stored in the product metafield `unitill.image_sha256`; an identical sha
