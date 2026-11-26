@@ -1,2 +1,4 @@
 github.com/universaltill/universal-till/sdk/plugin v1.1.1-0.20261027011746-4f5504db0242 h1:sWvb+QEnsVAFkf7iZYPhWKxFknqpDSDS5u+7gSuQ5Ks=
 github.com/universaltill/universal-till/sdk/plugin v1.1.1-0.20261027011746-4f5504db0242/go.mod h1:uloqSlLnxVF0SpSiKFKezpBm9CXLcd0MY1jHeeb3A1o=
+github.com/universaltill/universal-till/sdk/plugin v1.1.1-0.20261126231523-dd40e09abfcd h1:+Z0TDZVdw09XvZdnMJ34WOXnnxBATxDJXjjiUvAikgA=
+github.com/universaltill/universal-till/sdk/plugin v1.1.1-0.20261126231523-dd40e09abfcd/go.mod h1:uloqSlLnxVF0SpSiKFKezpBm9CXLcd0MY1jHeeb3A1o=

@@ -100,6 +100,14 @@ func (s *Shop) dispatch(req gqlRequest) (any, string) {
 		return obj{"shop": obj{"currencyCode": s.opt.Currency, "taxesIncluded": !s.opt.TaxesExcluded}}, ""
 	case "Products":
 		return s.opProducts(req), ""
+	case "ProductsByID":
+		return s.opProductsByID(req), ""
+	case "WebhookList":
+		return s.opWebhookList(req), ""
+	case "WebhookCreate":
+		return s.opWebhookCreate(req), ""
+	case "WebhookUpdate":
+		return s.opWebhookUpdate(req), ""
 	case "MoreVariants":
 		for _, p := range s.products {
 			if p.ID == s.str(req, "id") {

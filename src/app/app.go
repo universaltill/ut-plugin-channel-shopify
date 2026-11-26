@@ -13,14 +13,15 @@ import (
 // capabilities need (contract section 4).
 func Handlers() channel.Handlers {
 	return budgetedHandlers(channel.Handlers{
-		channel.AskConnectTest:   connectTest,
-		channel.AskOAuthCallback: oauthCallback,
-		channel.AskWebhook:       webhook,
-		channel.AskContact:       contact,
-		channel.AskFetch:         fetch,
-		channel.AskImport:        importCatalogue,
-		channel.AskOutbox:        drainOutbox,
-		channel.AskTick:          tick,
+		channel.AskConnectTest:     connectTest,
+		channel.AskOAuthCallback:   oauthCallback,
+		channel.AskWebhook:         webhook,
+		channel.AskContact:         contact,
+		channel.AskFetch:           fetch,
+		channel.AskImport:          importCatalogue,
+		channel.AskOutbox:          drainOutbox,
+		channel.AskTick:            tick,
+		channel.AskWebhookRegister: webhookRegister,
 	})
 }
 
@@ -128,6 +129,13 @@ func webhook(ev channel.Event) (any, error) {
 		}
 		out.ResourceIDs = []string{b.ID}
 	}
+	if out.Event == channel.EventProductChanged {
+		gid, err := productIDFromBody(in.Body)
+		if err != nil {
+			return nil, err
+		}
+		out.ResourceIDs = []string{gid}
+	}
 	if out.Event == channel.EventCustomerRedact {
 		cust, orders, truncated, err := redactIDs(in.Body)
 		if err != nil {
@@ -140,6 +148,33 @@ func webhook(ev channel.Event) (any, error) {
 		out.OrderIDsTruncated = truncated
 	}
 	return out, nil
+}
+
+// productIDFromBody reads from a products/* body ONLY the product's id: the
+// admin_graphql_api_id, or (a products/delete body has the numeric id only)
+// the numeric id turned into a typed gid. Every other field is skipped by the
+// decoder and never held; the product is re-read from Shopify, the body is
+// only a doorbell (ut-docs#7084).
+func productIDFromBody(body []byte) (string, error) {
+	bad := errors.New("body is not a product webhook of this channel")
+	var b struct {
+		GID string          `json:"admin_graphql_api_id"`
+		ID  json.RawMessage `json:"id"`
+	}
+	if json.Unmarshal(body, &b) != nil {
+		return "", bad
+	}
+	if b.GID != "" {
+		if !okGID(tProduct, b.GID) {
+			return "", bad
+		}
+		return b.GID, nil
+	}
+	gid := "gid://shopify/Product/" + string(b.ID)
+	if !numericIDRe.Match(b.ID) || !okGID(tProduct, gid) {
+		return "", bad
+	}
+	return gid, nil
 }
 
 // maxRedactOrders is the host's cap on order_ids of one customer_redact
@@ -202,6 +237,8 @@ func webhookEvent(topic string) string {
 	switch topic {
 	case "orders/create", "orders/updated":
 		return channel.EventOrderChanged
+	case "products/create", "products/update", "products/delete":
+		return channel.EventProductChanged
 	case "app/uninstalled":
 		return channel.EventUninstalled
 	case "customers/redact":

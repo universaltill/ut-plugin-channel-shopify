@@ -34,6 +34,9 @@ const (
 	// page; askCostCap is the hard limit inside a page (line completion).
 	askCostBudget = 1500
 	askCostCap    = 1800
+	// productFetchBudget stops a product re-read (the doorbell, ut-docs#7084)
+	// from starting another batch: five batches of productsPerRead.
+	productFetchBudget = 4500
 	// importCostBudget is a points sum kept for the 5 minute deadline.
 	importCostBudget = 9000
 )
@@ -54,6 +57,9 @@ const (
 	// maxFetchIDs is the most resource ids the host hands one fetch ask. A fetch
 	// reads what its budget allows and defers the rest to the tick sweep.
 	maxFetchIDs = 250
+	// productsPerRead is how many named products one ProductsByID request
+	// carries; with variantPage variants each it stays under 1,000 points.
+	productsPerRead = 5
 )
 
 // spent counts what the current ask has used: requests, host calls
