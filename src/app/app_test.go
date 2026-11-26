@@ -502,8 +502,7 @@ func TestImportEmitsVariantExternalVersion(t *testing.T) {
 	vids := e.shop.VariantIDs(1)
 	e.shop.SetVariantUpdatedAt(vids[0], "2026-11-26T10:05:00Z")
 	e.importAll()
-	var got map[string]string // variant id -> external_version
-	got = map[string]string{}
+	got := map[string]string{} // variant id -> external_version
 	var product string
 	for _, raw := range e.submitted(channel.KindListing) {
 		var l struct {
