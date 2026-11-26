@@ -495,3 +495,41 @@ func TestFromMemoryShopifyNamesLiveInOnePlace(t *testing.T) {
 		}
 	}
 }
+
+// ut-docs#6985: each variant carries its own updatedAt as external_version.
+func TestImportEmitsVariantExternalVersion(t *testing.T) {
+	e := newEnv(t, fakeshop.Options{})
+	vids := e.shop.VariantIDs(1)
+	e.shop.SetVariantUpdatedAt(vids[0], "2026-11-26T10:05:00Z")
+	e.importAll()
+	got := map[string]string{} // variant id -> external_version
+	var product string
+	for _, raw := range e.submitted(channel.KindListing) {
+		var l struct {
+			ExternalID      string `json:"external_id"`
+			ExternalVersion string `json:"external_version"`
+			Variants        []struct {
+				ExternalID      string `json:"external_id"`
+				ExternalVersion string `json:"external_version"`
+			} `json:"variants"`
+		}
+		if err := json.Unmarshal(raw, &l); err != nil {
+			t.Fatal(err)
+		}
+		if l.ExternalID == e.shop.ProductIDs()[0] {
+			product = l.ExternalVersion
+		}
+		for _, v := range l.Variants {
+			got[v.ExternalID] = v.ExternalVersion
+		}
+	}
+	if got[vids[0]] != "2026-11-26T10:05:00Z" {
+		t.Errorf("variant 1 external_version %q, want 2026-11-26T10:05:00Z", got[vids[0]])
+	}
+	if got[vids[1]] != "2026-10-22T09:00:01Z" { // no own time: the product's
+		t.Errorf("variant 2 external_version %q, want 2026-10-22T09:00:01Z", got[vids[1]])
+	}
+	if product != "2026-10-22T09:00:01Z" {
+		t.Errorf("product time %q, want unchanged 2026-10-22T09:00:01Z", product)
+	}
+}

@@ -239,7 +239,11 @@ func (s *Shop) variantPage(p product, first int, after string) obj {
 		if v.CompareAt != "" {
 			cmp = v.CompareAt
 		}
-		nodes = append(nodes, obj{"id": v.ID, "sku": v.SKU, "barcode": bc, "price": v.Price, "compareAtPrice": cmp, "taxable": v.Taxable,
+		vu := v.UpdatedAt
+		if vu == "" {
+			vu = p.UpdatedAt
+		}
+		nodes = append(nodes, obj{"id": v.ID, "updatedAt": vu, "sku": v.SKU, "barcode": bc, "price": v.Price, "compareAtPrice": cmp, "taxable": v.Taxable,
 			"selectedOptions": opts, "inventoryItem": obj{"tracked": v.Tracked}})
 	}
 	return obj{"pageInfo": pi(more, ec), "nodes": nodes}
