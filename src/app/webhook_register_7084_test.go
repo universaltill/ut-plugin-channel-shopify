@@ -246,3 +246,24 @@ func TestRegisterOnlyWritesWebhookSubscriptionsAndAnswersAllAskedTopics(t *testi
 		}
 	}
 }
+
+// A subscription under /hooks/channel/ of ANOTHER host (a staging cloud beside
+// prod) is not ours: it is never repointed (review 2026-11-26, M2).
+func TestRegisterNeverRepointsAnotherCloudsHookSubscription(t *testing.T) {
+	e := newEnv(t, fakeshop.Options{})
+	other := "https://staging.example.invalid/hooks/channel/com.universaltill.channel-shopify/QQQQQQQQQQQQQQQQQQQQQQ"
+	id := e.shop.AddSubscription("PRODUCTS_UPDATE", other)
+	if _, err := e.register(cb, productTopics, channel.WebhookModeEnsure); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range e.shop.Subscriptions() {
+		if s.ID == id && s.URL != other {
+			t.Fatalf("another cloud's subscription was repointed: %+v", s)
+		}
+	}
+	for _, r := range e.shop.Requests() {
+		if r.Op == "WebhookUpdate" {
+			t.Fatal("an update was sent for a subscription that is not ours")
+		}
+	}
+}

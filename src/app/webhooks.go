@@ -64,6 +64,24 @@ func okCallback(u string) (path string, ok bool) {
 	return m[3], true
 }
 
+// sameHookOwner says a subscription's address is ours to repoint: the same
+// host and the same plugin segment under /hooks/channel/ as the new address
+// (a rotation changes only the connection ref). Another cloud's hook address
+// (staging beside prod) is never taken over.
+func sameHookOwner(old, url string) bool {
+	op, ok := okCallback(old)
+	if !ok {
+		return false
+	}
+	np, ok := okCallback(url)
+	if !ok {
+		return false
+	}
+	host := func(u, path string) string { return strings.ToLower(strings.TrimSuffix(u, path)) }
+	seg := func(p string) string { return strings.SplitN(strings.TrimPrefix(p, hookPathPrefix), "/", 2)[0] }
+	return host(old, op) == host(url, np) && seg(op) == seg(np)
+}
+
 type whSub struct {
 	ID       string `json:"id"`
 	Topic    string `json:"topic"`
@@ -154,7 +172,7 @@ func ensureTopic(topic, url string, subs []whSub) channel.TopicState {
 		if s.Endpoint.Callback == url {
 			return channel.TopicState{State: channel.TopicAlready}
 		}
-		if p, ok := okCallback(s.Endpoint.Callback); ok && strings.HasPrefix(p, hookPathPrefix) && ours == nil && okGID(tWebhook, s.ID) {
+		if ours == nil && sameHookOwner(s.Endpoint.Callback, url) && okGID(tWebhook, s.ID) {
 			ours = s
 		}
 	}
