@@ -64,6 +64,11 @@ if cap.get("items") != "both": errs.append("capabilities.items must be 'both': t
 # were rejected for it). The image.upsert code stays dormant: the cloud queues it only for a declared field.
 # Whatever is declared must also be a subset of the till's allowed list (scripts/check-push-fields.sh, run at the end).
 if c.get("push_fields") != ["price", "name", "description", "sku", "barcodes"]: errs.append('channel.push_fields must be ["price","name","description","sku","barcodes"]: the adapter pushes exactly these (category is fill-only, compare_at is not pushed; image waits for ADR-0212 and a till that allows it, ut-docs#6975), so any other list re-queues no-op upserts or loops')
+# ut-docs#7084 (0.8.0): inbound images are gated on capabilities.images = pull (never on push_fields), and the product
+# topics are the doorbell the host registers through channel.webhook.register.ask. Inbound only: "both" needs the signing key.
+if cap.get("images") != "pull": errs.append("capabilities.images must be 'pull' (ut-docs#7084: inbound image only; outbound stays off until ADR-0212 is Accepted)")
+for tp in ("products/create", "products/update", "products/delete"):
+    if tp not in (c.get("webhooks") or {}).get("topics", []): errs.append(f"webhooks.topics must declare {tp} (ut-docs#7084 product doorbell)")
 if cap.get("variants") not in ("pull", "both"): errs.append("capabilities.variants is 'pull' or 'both' (price push to existing variants only)")
 # The adapter does order.cancel and refund.create (ut-docs#4774): without push the cloud never queues them.
 for k in ("fulfilment", "cancel", "refunds"):

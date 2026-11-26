@@ -97,7 +97,9 @@ connection's verified account and adds the access token.
   category of an already-categorised product waits for the cloud to send the
   category only when it changed (proposal on ut-docs#4942).
 
-  **Image sync (code in 0.7.0, ADR-0212, ut-docs#6843 S5; DORMANT since 0.7.2, ut-docs#6975).** `"image"` is not in `push_fields`: the till validator rejects it until ADR-0212 is Accepted and the till allows it; re-add it then and widen `scripts/check-push-fields.sh`. `image.upsert` passes the cloud's
+  **Product doorbell, webhook registration, inbound image (0.8.0, ut-docs#7084).** `products/create|update|delete` webhooks ring the host (neutral event `product_changed`, product id only); the host re-reads the named products with `channel.fetch.ask` (batched `nodes(ids:)`, `qProductsByID`) and registers the three subscriptions itself with `channel.webhook.register.ask` (`webhookSubscriptionCreate/Update`, `includeFields: id, admin_graphql_api_id, updated_at`, retried without it if refused; deliveries are signed with the app's client secret, the key the host already holds). GDPR topics stay manual; nothing is deleted. The manifest declares `capabilities.images: pull` so the cloud reads the first image inbound. Verify on the dev store: the subscription names and `includeFields` acceptance on API 2026-10, one real delivery's HMAC, and that a media-only edit fires `products/update`.
+
+**Image sync (code in 0.7.0, ADR-0212, ut-docs#6843 S5; DORMANT since 0.7.2, ut-docs#6975).** `"image"` is not in `push_fields`: the till validator rejects it until ADR-0212 is Accepted and the till allows it; re-add it then and widen `scripts/check-push-fields.sh`. `image.upsert` passes the cloud's
   signed, at most 15 minute `fetch_url` to Shopify as `productCreateMedia` `originalSource`
   (Shopify fetches; the plugin never gets bytes; no egress host added; the URL is never logged).
   The pushed sha256 is stored in the product metafield `unitill.image_sha256`; an identical sha

@@ -25,6 +25,8 @@ var mutationName = regexp.MustCompile(`^mutation (\w+)`)
 
 var allowedMutations = map[string]bool{
 	"InventorySet": true, "InventoryActivate": true, "VariantPrices": true, "ProductType": true, "ProductCreateMedia": true, "ProductReorderMedia": true, "MetafieldsSet": true, "FulfillmentCreate": true,
+	// ut-docs#7084: our own webhook subscriptions (create, repoint). Never a delete.
+	"WebhookCreate": true, "WebhookUpdate": true,
 	// ut-docs#4774: a cancel keeps the order and a refund adds a refund; neither deletes.
 	"OrderCancel": true, "RefundCreate": true,
 }

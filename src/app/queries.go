@@ -54,6 +54,8 @@ const (
 	// The product's primary image for the import: the first media (Product.featuredMedia,
 	// a Media; only a MediaImage has image { url }). Only its url and id are read.
 	fFeatured = `featuredMedia { id ... on MediaImage { image { url } } }`
+	// The product fields an import row and a doorbell re-read share.
+	productFields = `id title descriptionHtml status updatedAt ` + fCategory + ` ` + fFeatured + ` variants(first: $vfirst) { ` + pageInfo + ` nodes { ` + variantFields + ` } }`
 	// What the name and status push decide from (ut-docs#5014), read ONCE per op:
 	// the title, the status, updatedAt (the "Shopify edited it later" guard) and
 	// the number of variants (a title is only written to a single-variant
@@ -183,7 +185,27 @@ var (
 
 	qProducts = queryDef{Name: "Products", Cost: 700, Text: `query Products($first: Int!, $after: String, $vfirst: Int!) { ` +
 		`shop { currencyCode taxesIncluded } products(first: $first, after: $after, sortKey: ID) { ` + pageInfo +
-		` nodes { id title descriptionHtml status updatedAt ` + fCategory + ` ` + fFeatured + ` variants(first: $vfirst) { ` + pageInfo + ` nodes { ` + variantFields + ` } } } } }`}
+		` nodes { ` + productFields + ` } } }`}
+
+	// qProductsByID re-reads named products in ONE request (the product
+	// doorbell, ut-docs#7084): the same fields as the import, so a re-read row
+	// equals an imported row. A node that is null is gone or not readable.
+	qProductsByID = queryDef{Name: "ProductsByID", Cost: 880, Text: `query ProductsByID($ids: [ID!]!, $vfirst: Int!) { ` +
+		`shop { currencyCode taxesIncluded } nodes(ids: $ids) { ... on Product { ` + productFields + ` } } }`}
+
+	// Webhook subscriptions (ut-docs#7084). webhookSubscriptions lists only
+	// the subscriptions this app created. userErrors select field and message
+	// only to be classified (the message can echo the callback URL: it is
+	// never logged or returned). Names are from the Admin API docs; none has run
+	// against a real store (README, "Verify first on the dev store").
+	qWebhookList = queryDef{Name: "WebhookList", Cost: 20, Text: `query WebhookList($first: Int!, $topics: [WebhookSubscriptionTopic!]) { ` +
+		`webhookSubscriptions(first: $first, topics: $topics) { nodes { id topic endpoint { __typename ... on WebhookHttpEndpoint { callbackUrl } } } } }`}
+
+	qWebhookCreate = queryDef{Name: "WebhookCreate", Cost: 10, Mutation: true, Text: `mutation WebhookCreate($topic: WebhookSubscriptionTopic!, $sub: WebhookSubscriptionInput!) { ` +
+		`webhookSubscriptionCreate(topic: $topic, webhookSubscription: $sub) { webhookSubscription { id } userErrors { field message } } }`}
+
+	qWebhookUpdate = queryDef{Name: "WebhookUpdate", Cost: 10, Mutation: true, Text: `mutation WebhookUpdate($id: ID!, $sub: WebhookSubscriptionInput!) { ` +
+		`webhookSubscriptionUpdate(id: $id, webhookSubscription: $sub) { webhookSubscription { id } userErrors { field message } } }`}
 
 	qMoreVariants = queryDef{Name: "MoreVariants", Cost: 200, Text: `query MoreVariants($id: ID!, $first: Int!, $after: String) { ` +
 		`node(id: $id) { ... on Product { variants(first: $first, after: $after) { ` + pageInfo + ` nodes { ` + variantFields + ` } } } } }`}
