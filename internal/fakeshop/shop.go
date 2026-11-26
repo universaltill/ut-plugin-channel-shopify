@@ -76,6 +76,8 @@ type variant struct {
 	Taxable                         bool
 	Options                         [][2]string
 	Tracked                         bool
+	// UpdatedAt is the variant's own updatedAt; "" = the product's.
+	UpdatedAt string
 }
 
 type product struct {
@@ -458,6 +460,15 @@ func (s *Shop) VariantIDs(i int) []string {
 		out = append(out, v.ID)
 	}
 	return out
+}
+
+// SetVariantUpdatedAt sets one variant's own updatedAt (RFC 3339).
+func (s *Shop) SetVariantUpdatedAt(id, ts string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v, _ := s.findVariant(id); v != nil {
+		v.UpdatedAt = ts
+	}
 }
 
 // Locations returns the location ids.

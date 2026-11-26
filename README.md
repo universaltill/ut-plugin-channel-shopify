@@ -119,6 +119,7 @@ connection's verified account and adds the access token.
   value never clears a Shopify value; a SKU or barcode over 255 characters or a
   description over 5,000 refuses the op `invalid_payload` before any request.
   Import reads sku, barcode (trimmed) and description (read as `descriptionHtml` and normalised: Shopify's plain `Product.description` glues paragraphs together, "<p>a</p><p>b</p>" reads "ab", which made every two-paragraph description read back changed; 0.7.1).
+  Each variant also carries its own `updatedAt` as `variants[].external_version` (0.7.3, ut-docs#6985; additive contract field, product `external_version` unchanged).
 
   **Name and status sync (0.5.0, owner requirement 2026-11-20, ADR-0202,
   ut-docs#5014).** The manifest declares `push_fields: ["price", "name"]`: the

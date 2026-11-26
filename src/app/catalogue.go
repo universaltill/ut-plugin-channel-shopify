@@ -26,6 +26,7 @@ type pageInfoT struct {
 
 type gqlVariant struct {
 	ID              string  `json:"id"`
+	UpdatedAt       string  `json:"updatedAt"`
 	SKU             string  `json:"sku"`
 	Barcode         string  `json:"barcode"`
 	Price           string  `json:"price"`
@@ -38,6 +39,21 @@ type gqlVariant struct {
 	InventoryItem struct {
 		Tracked bool `json:"tracked"`
 	} `json:"inventoryItem"`
+}
+
+// outVariant is channel.Variant plus the additive contract field
+// variants[].external_version (sales-channel-v1 s7; the SDK type has none):
+// the variant's own updatedAt, so the cloud can tell a variant-only edit.
+// Absent or unreadable = omitted (older/unknown), never a refusal.
+type outVariant struct {
+	channel.Variant
+	ExternalVersion string `json:"external_version,omitempty"`
+}
+
+// outListing shadows Listing.Variants with outVariant (the outer field wins in JSON).
+type outListing struct {
+	channel.Listing
+	Variants []outVariant `json:"variants,omitempty"`
 }
 
 type gqlVariants struct {
@@ -141,7 +157,7 @@ func importProducts(st *importStats) (finished bool, err error) {
 		if !curRe.MatchString(d.Shop.Currency) {
 			return false, errors.New("the shop reported no usable currency")
 		}
-		listings := make([]channel.Listing, 0, len(d.Products.Nodes))
+		listings := make([]outListing, 0, len(d.Products.Nodes))
 		for _, p := range d.Products.Nodes {
 			l, reason := mapProduct(&p, d.Shop)
 			if reason != "" {
@@ -205,18 +221,19 @@ func completeVariants(p *gqlProduct) error {
 // that cannot be mapped is refused with a reason code (logged), never
 // truncated or repaired: a shop over the option or variant limit gets a
 // refusal, not a truncation (ADR-0169 section 7).
-func mapProduct(p *gqlProduct, shop shopInfo) (channel.Listing, string) {
+func mapProduct(p *gqlProduct, shop shopInfo) (outListing, string) {
 	if !okGID(tProduct, p.ID) || !timeRe.MatchString(p.UpdatedAt) {
-		return channel.Listing{}, "bad_product"
+		return outListing{}, "bad_product"
 	}
 	if err := completeVariants(p); err != nil {
 		logErr("import.variants_failed", err)
-		return channel.Listing{}, "variants_unavailable"
+		return outListing{}, "variants_unavailable"
 	}
 	if len(p.Variants.Nodes) > maxVariants || p.Variants.PageInfo.HasNextPage {
-		return channel.Listing{}, "too_many_variants"
+		return outListing{}, "too_many_variants"
 	}
-	l := channel.Listing{
+	var l outListing
+	l.Listing = channel.Listing{
 		Identity: channel.Identity{ExternalID: p.ID, ExternalVersion: p.UpdatedAt},
 		Title:    clip(p.Title, 255), Description: clip(NormalizeText(p.Description), 5000), Status: listingStatus(p.Status),
 	}
@@ -230,7 +247,7 @@ func mapProduct(p *gqlProduct, shop shopInfo) (channel.Listing, string) {
 	for _, v := range p.Variants.Nodes {
 		price, ok := parseMoney(v.Price, shop.Currency)
 		if !okGID(tVariant, v.ID) || !ok {
-			return channel.Listing{}, "bad_variant"
+			return outListing{}, "bad_variant"
 		}
 		out := channel.Variant{
 			ExternalID: v.ID, SKU: clip(strings.TrimSpace(v.SKU), 100), PriceMinor: price, Currency: shop.Currency,
@@ -252,12 +269,16 @@ func mapProduct(p *gqlProduct, shop shopInfo) (channel.Listing, string) {
 			opts[clip(o.Name, 100)] = clip(o.Value, 100)
 		}
 		if len(opts) > maxOptions {
-			return channel.Listing{}, "too_many_options"
+			return outListing{}, "too_many_options"
 		}
 		if len(opts) > 0 {
 			out.Options = opts
 		}
-		l.Variants = append(l.Variants, out)
+		ov := outVariant{Variant: out}
+		if timeRe.MatchString(v.UpdatedAt) {
+			ov.ExternalVersion = v.UpdatedAt
+		}
+		l.Variants = append(l.Variants, ov)
 	}
 	return l, ""
 }

@@ -157,7 +157,7 @@ const (
 	maxLocations = 20
 )
 
-const variantFields = `id sku barcode price ` + fCompareAt + ` taxable selectedOptions { name value } inventoryItem { tracked }`
+const variantFields = `id updatedAt sku barcode price ` + fCompareAt + ` taxable selectedOptions { name value } inventoryItem { tracked }`
 
 const pageInfo = `pageInfo { hasNextPage endCursor }`
 
