@@ -34,7 +34,7 @@ func TestManifest080DeclaresProductTopicsAndPullImagesAndKeepsScopes(t *testing.
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
 	}
-	if m.Version != "0.8.0" {
+	if m.Version != "0.8.1" {
 		t.Errorf("version %s", m.Version)
 	}
 	if !reflect.DeepEqual(m.Permissions, []string{"net:{account}"}) {
