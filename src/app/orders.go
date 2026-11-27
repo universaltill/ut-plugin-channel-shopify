@@ -299,8 +299,9 @@ func logRefused(reason string, o *gqlOrder) {
 	hostLog(channel.LevelWarn, "order.refused."+reason, map[string]any{"lines": len(o.Lines.Nodes), "shipping_lines": len(o.ShippingLines.Nodes), "refunds": len(o.Refunds)})
 }
 
-// fetch re-fetches the named orders and submits them. A webhook is only a
-// doorbell: the order is read from Shopify, never taken from the hook.
+// fetch re-fetches the named orders and products and submits them. A webhook
+// is only a doorbell: the resource is read from Shopify, never taken from the
+// hook. Ids are routed by their gid type; orders are read first.
 func fetch(ev channel.Event) (any, error) {
 	var in channel.FetchInput
 	if err := ev.Decode(&in); err != nil {
@@ -309,16 +310,23 @@ func fetch(ev channel.Event) (any, error) {
 	if len(in.ResourceIDs) > maxFetchIDs {
 		return nil, errors.New("too many resources")
 	}
+	var orderIDs, productIDs []string
+	for _, id := range in.ResourceIDs {
+		switch {
+		case okGID(tOrder, id):
+			orderIDs = append(orderIDs, id)
+		case okGID(tProduct, id):
+			productIDs = append(productIDs, id)
+		default:
+			hostLog(channel.LevelWarn, "fetch.skip_id", map[string]any{"reason": "not_an_id"})
+		}
+	}
 	var recs []channel.Order
 	overBudget := false
-	for _, id := range in.ResourceIDs {
+	for _, id := range orderIDs {
 		if spent.cost >= askCostBudget {
 			overBudget = true // read the rest on the retry: the ask must end inside the host's deadline
 			break
-		}
-		if !okGID(tOrder, id) {
-			hostLog(channel.LevelWarn, "fetch.skip_id", map[string]any{"reason": "not_an_id"})
-			continue
 		}
 		var d struct {
 			Order *gqlOrder `json:"order"`
@@ -355,6 +363,18 @@ func fetch(ev channel.Event) (any, error) {
 		// sweep (orders updated since its cursor) reads them: none is lost.
 		hostLog(channel.LevelWarn, "fetch.deferred_to_tick", map[string]any{"read": len(recs), "asked": len(in.ResourceIDs)})
 		out["deferred"] = true
+	}
+	if len(productIDs) > 0 {
+		n, deferred, err := fetchProducts(productIDs)
+		if err != nil {
+			return nil, err
+		}
+		out["products"] = n
+		if len(deferred) > 0 {
+			// Read on the host's retry (deferred_ids) or by the next full re-read.
+			out["deferred"] = true
+			out["deferred_ids"] = deferred
+		}
 	}
 	return out, nil
 }

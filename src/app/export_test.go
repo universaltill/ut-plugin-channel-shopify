@@ -8,7 +8,7 @@ import "encoding/json"
 func AllQueries() []string {
 	var out []string
 	for _, q := range []queryDef{qConnectTest, qProducts, qMoreVariants, qShopCurrency, qLocations, qLevels, qOrders, qOrder, qOrderLines, qContact,
-		qStockTarget, qInventorySet, qInventoryActivate, qVariantPrice, qVariantPrices, qProductType, qProductImage, qProductCreateMedia, qProductReorderMedia, qMetafieldsSet, qFulfilmentOrders, qFulfillmentCreate,
+		qProductsByID, qWebhookList, qWebhookCreate, qWebhookUpdate, qStockTarget, qInventorySet, qInventoryActivate, qVariantPrice, qVariantPrices, qProductType, qProductImage, qProductCreateMedia, qProductReorderMedia, qMetafieldsSet, qFulfilmentOrders, qFulfillmentCreate,
 		qOrderCancel, qCancelJob, qRefundState, qSuggestedRefund, qRefundCreate} {
 		out = append(out, q.Text)
 	}
@@ -30,6 +30,7 @@ const (
 	AskCostCap        = askCostCap
 	ImportCostBudget  = importCostBudget
 	MaxTickStockPages = maxTickStockPages
+	MaxProductFetch   = productsPerRead * 5
 )
 
 // ParseMoney, FormatMoney and RateBP expose the money helpers to tests.

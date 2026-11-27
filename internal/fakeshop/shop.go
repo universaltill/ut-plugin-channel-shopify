@@ -223,6 +223,10 @@ type Shop struct {
 	jobs                              map[string]*cancelJob
 	pending                           map[string]string // order id -> job id of a cancel still running
 	hooks                             map[string]func() // operation -> run once, just before the next such mutation
+	subs                              []subscription    // webhook subscriptions of this app (ut-docs#7084)
+	subSeq                            int
+	refuseInclude                     bool
+	subUserErr                        string
 }
 
 // New returns a seeded shop.

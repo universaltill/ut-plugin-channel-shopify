@@ -62,10 +62,11 @@ const (
 	tFulfOrder = "FulfillmentOrder"
 	tTxn       = "OrderTransaction"
 	tJob       = "Job"
+	tWebhook   = "WebhookSubscription"
 )
 
 func init() {
-	for _, t := range []string{tProduct, tVariant, tOrder, tLineItem, tLocation, tInvItem, tCustomer, tFulfOrder, tTxn, tJob} {
+	for _, t := range []string{tProduct, tVariant, tOrder, tLineItem, tLocation, tInvItem, tCustomer, tFulfOrder, tTxn, tJob, tWebhook} {
 		gidRes[t] = regexp.MustCompile(`^gid://shopify/` + t + `/[0-9]{1,20}$`)
 	}
 }
