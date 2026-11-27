@@ -2,6 +2,8 @@
 
 package app
 
+import "encoding/json"
+
 // AllQueries lists every operation text, for the pinning tests.
 func AllQueries() []string {
 	var out []string
@@ -83,4 +85,16 @@ func StampAfter(a, b string) (after, ok bool) {
 	x, ok1 := parseStamp(a)
 	y, ok2 := parseStamp(b)
 	return x.after(y), ok1 && ok2
+}
+
+// MapProductJSON maps one Shopify product (the JSON of the import query's node)
+// to the listing JSON the plugin submits, for the mapping tests.
+func MapProductJSON(js string, taxesIncluded bool) (string, string) {
+	var p gqlProduct
+	if err := json.Unmarshal([]byte(js), &p); err != nil {
+		return "", "bad_json:" + err.Error()
+	}
+	l, reason := mapProduct(&p, shopInfo{Currency: "GBP", TaxesIncluded: taxesIncluded})
+	b, _ := json.Marshal(l)
+	return string(b), reason
 }

@@ -54,8 +54,17 @@ const (
 	// The product's primary image for the import: the first media (Product.featuredMedia,
 	// a Media; only a MediaImage has image { url }). Only its url and id are read.
 	fFeatured = `featuredMedia { id ... on MediaImage { image { url } } }`
+	// ut-docs#7101: every product image in the merchant's order, with its alt text.
+	// Verified against shopify.dev Admin GraphQL 2026-10 (2026-11-26): Product.media(first)
+	// is a MediaConnection; MediaImage has alt (String) and image { url } (null until READY);
+	// Product.isGiftCard is Boolean!. ProductVariant.media is current (ProductVariant.image
+	// is deprecated), so the variant's images are read with media(first: 1) and matched by id.
+	fMedia        = `media(first: 10) { nodes { id ... on MediaImage { alt image { url } } } }`
+	fVariantMedia = `media(first: 1) { nodes { id } }`
+	// Product.isGiftCard (ut-docs#7099, ADR-0220).
+	fGiftCard = `isGiftCard`
 	// The product fields an import row and a doorbell re-read share.
-	productFields = `id title descriptionHtml status updatedAt ` + fCategory + ` ` + fFeatured + ` variants(first: $vfirst) { ` + pageInfo + ` nodes { ` + variantFields + ` } }`
+	productFields = `id title descriptionHtml status updatedAt ` + fCategory + ` ` + fFeatured + ` ` + fMedia + ` ` + fGiftCard + ` variants(first: $vfirst) { ` + pageInfo + ` nodes { ` + variantFields + ` } }`
 	// What the name and status push decide from (ut-docs#5014), read ONCE per op:
 	// the title, the status, updatedAt (the "Shopify edited it later" guard) and
 	// the number of variants (a title is only written to a single-variant
@@ -159,7 +168,7 @@ const (
 	maxLocations = 20
 )
 
-const variantFields = `id updatedAt sku barcode price ` + fCompareAt + ` taxable selectedOptions { name value } inventoryItem { tracked }`
+const variantFields = `id updatedAt sku barcode price ` + fCompareAt + ` taxable selectedOptions { name value } inventoryItem { tracked } ` + fVariantMedia
 
 const pageInfo = `pageInfo { hasNextPage endCursor }`
 

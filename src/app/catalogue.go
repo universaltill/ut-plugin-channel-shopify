@@ -39,6 +39,13 @@ type gqlVariant struct {
 	InventoryItem struct {
 		Tracked bool `json:"tracked"`
 	} `json:"inventoryItem"`
+	// Media is the variant's own media (ProductVariant.media, API 2026-10);
+	// only the ids are read, they point into Product.media (ut-docs#7101).
+	Media *struct {
+		Nodes []struct {
+			ID string `json:"id"`
+		} `json:"nodes"`
+	} `json:"media"`
 }
 
 // outVariant is channel.Variant plus the additive contract field
@@ -47,7 +54,10 @@ type gqlVariant struct {
 // Absent or unreadable = omitted (older/unknown), never a refusal.
 type outVariant struct {
 	channel.Variant
-	ExternalVersion string `json:"external_version,omitempty"`
+	// VariantImageIndex is the 0-based index into the listing's images of the
+	// variant's own first image (ut-docs#7101); nil = none.
+	VariantImageIndex *int   `json:"variant_image_index,omitempty"`
+	ExternalVersion   string `json:"external_version,omitempty"`
 }
 
 // outListing shadows Listing.Variants with outVariant (the outer field wins in JSON).
@@ -101,13 +111,26 @@ type gqlProduct struct {
 	Status      string      `json:"status"`
 	UpdatedAt   string      `json:"updatedAt"`
 	Variants    gqlVariants `json:"variants"`
-	Featured    *struct {
-		ID    string `json:"id"`
-		Image *struct {
-			URL string `json:"url"`
-		} `json:"image"`
-	} `json:"featuredMedia"`
+	IsGiftCard  bool        `json:"isGiftCard"`
+	// Media is Product.media in the merchant's order (ut-docs#7101).
+	Media *struct {
+		Nodes []gqlMedia `json:"nodes"`
+	} `json:"media"`
+	// Featured is the legacy primary image, used only when Media is absent.
+	Featured *gqlMedia `json:"featuredMedia"`
 }
+
+// gqlMedia is a Media node; only a MediaImage has alt and image { url }.
+type gqlMedia struct {
+	ID    string `json:"id"`
+	Alt   string `json:"alt"`
+	Image *struct {
+		URL string `json:"url"`
+	} `json:"image"`
+}
+
+// maxListingImages is the gallery cap (ADR-0218): ten per owner.
+const maxListingImages = 10
 
 type shopInfo struct {
 	Currency      string `json:"currencyCode"`
@@ -307,9 +330,26 @@ func mapProduct(p *gqlProduct, shop shopInfo) (outListing, string) {
 		Identity: channel.Identity{ExternalID: p.ID, ExternalVersion: p.UpdatedAt},
 		Title:    clip(p.Title, 255), Description: clip(NormalizeText(p.Description), 5000), Status: listingStatus(p.Status),
 	}
-	// The first image only (ADR-0212): the cloud downloads and hashes it itself.
-	if f := p.Featured; f != nil && f.Image != nil && okImageURL(f.Image.URL) && f.ID != "" {
-		l.Images = []channel.Image{{ExternalID: f.ID, URL: f.Image.URL, Position: 1}}
+	if p.IsGiftCard {
+		l.Kind = "gift_card" // ut-docs#7099, ADR-0220: the cloud decides what to do with it
+	}
+	// Every product image in order with its alt text (ut-docs#7101, ADR-0218); the
+	// cloud downloads and hashes them itself, behind its own flags. Video/3D/external
+	// media and non-https urls are skipped. Product.media is in the merchant's order.
+	imgIdx := map[string]int{} // media id -> index into l.Images
+	add := func(m gqlMedia) {
+		if len(l.Images) >= maxListingImages || m.ID == "" || m.Image == nil || !okImageURL(m.Image.URL) {
+			return
+		}
+		imgIdx[m.ID] = len(l.Images)
+		l.Images = append(l.Images, channel.Image{ExternalID: m.ID, URL: m.Image.URL, Position: len(l.Images) + 1, Alt: clip(strings.TrimSpace(m.Alt), 512)})
+	}
+	if p.Media != nil {
+		for _, m := range p.Media.Nodes {
+			add(m)
+		}
+	} else if p.Featured != nil {
+		add(*p.Featured)
 	}
 	if c := p.single(); c != "" {
 		l.CategoryPath = []string{c}
@@ -321,8 +361,13 @@ func mapProduct(p *gqlProduct, shop shopInfo) (outListing, string) {
 		}
 		out := channel.Variant{
 			ExternalID: v.ID, SKU: clip(strings.TrimSpace(v.SKU), 100), PriceMinor: price, Currency: shop.Currency,
-			TaxIncluded: shop.TaxesIncluded && v.Taxable, Tracked: v.InventoryItem.Tracked,
+			// TaxIncluded is the shop's price basis, whatever the variant's tax
+			// state (ut-docs#7099): folding "not taxable" into it made the cloud
+			// gross a final price up by the default rate.
+			TaxIncluded: shop.TaxesIncluded, Tracked: v.InventoryItem.Tracked,
 		}
+		tx := v.Taxable
+		out.Taxable = &tx
 		if v.CompareAtPrice != nil {
 			if c, ok := parseMoney(*v.CompareAtPrice, shop.Currency); ok && c > 0 {
 				out.CompareAtMinor = c
@@ -345,10 +390,23 @@ func mapProduct(p *gqlProduct, shop shopInfo) (outListing, string) {
 			out.Options = opts
 		}
 		ov := outVariant{Variant: out}
+		if v.Media != nil {
+			for _, m := range v.Media.Nodes {
+				if i, ok := imgIdx[m.ID]; ok {
+					i := i
+					ov.VariantImageIndex = &i
+					break
+				}
+			}
+		}
 		if timeRe.MatchString(v.UpdatedAt) {
 			ov.ExternalVersion = v.UpdatedAt
 		}
 		l.Variants = append(l.Variants, ov)
+	}
+	if len(l.Variants) == 1 && l.Variants[0].VariantImageIndex != nil { // contract: listing-level field
+		i := *l.Variants[0].VariantImageIndex
+		l.VariantImageIndex = &i
 	}
 	return l, ""
 }
